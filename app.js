@@ -1,17 +1,22 @@
-const state = {
-  mode: null, // 'epub' | 'converted'
-  originalName: 'book',
-  zip: null,
-  opfPath: '',
-  opfDir: '',
-  title: '',
-  author: '',
-  cover: null, // { blob, mime, url, originalPath, id, changed, removed }
-  images: [],  // { id, path, name, size, mime, blob, url, markedDelete }
-  sampleParagraphs: [],
-  totalChapters: 0,
-  totalParagraphs: 0,
-  convertedChapters: [] // { title, html } для FB2 / TXT
+const SETTINGS_KEY = 'pereplet_settings_v2';
+
+const defaultSettings = {
+  removeIndent: true,
+  cleanEmpty: true,
+  spacing: 0.85,
+  fixDashes: true,
+  fixTypo: false,
+  fixDarkMode: true,
+  stripMedia: true,
+  fontMode: 'keep',
+  alignMode: 'keep'
+};
+
+const appState = {
+  books: [],
+  activeIndex: 0,
+  settings: loadSettings(),
+  customFont: null // { name, ext, mime, buffer }
 };
 
 const els = {
@@ -19,7 +24,11 @@ const els = {
   workspace: document.getElementById('workspace'),
   fileInput: document.getElementById('fileInput'),
   selectFileBtn: document.getElementById('selectFileBtn'),
+  addMoreBtn: document.getElementById('addMoreBtn'),
   resetBtn: document.getElementById('resetBtn'),
+  queuePanel: document.getElementById('queuePanel'),
+  queueTitle: document.getElementById('queueTitle'),
+  bookTabs: document.getElementById('bookTabs'),
   formatBadge: document.getElementById('formatBadge'),
   coverImg: document.getElementById('coverImg'),
   coverPlaceholder: document.querySelector('.cover-placeholder'),
@@ -28,15 +37,36 @@ const els = {
   removeCoverBtn: document.getElementById('removeCoverBtn'),
   titleInput: document.getElementById('titleInput'),
   authorInput: document.getElementById('authorInput'),
+  seriesInput: document.getElementById('seriesInput'),
+  seriesIndexInput: document.getElementById('seriesIndexInput'),
   statChapters: document.getElementById('statChapters'),
   statParagraphs: document.getElementById('statParagraphs'),
   statImages: document.getElementById('statImages'),
+  statMedia: document.getElementById('statMedia'),
   removeIndentToggle: document.getElementById('removeIndentToggle'),
   cleanEmptyToggle: document.getElementById('cleanEmptyToggle'),
   spacingRange: document.getElementById('spacingRange'),
   spacingVal: document.getElementById('spacingVal'),
+  fixDashesToggle: document.getElementById('fixDashesToggle'),
+  dashCountPill: document.getElementById('dashCountPill'),
+  fixTypoToggle: document.getElementById('fixTypoToggle'),
+  typoCountPill: document.getElementById('typoCountPill'),
+  fixDarkModeToggle: document.getElementById('fixDarkModeToggle'),
+  stripMediaToggle: document.getElementById('stripMediaToggle'),
+  mediaCountPill: document.getElementById('mediaCountPill'),
+  fontSelect: document.getElementById('fontSelect'),
+  alignSelect: document.getElementById('alignSelect'),
+  customFontRow: document.getElementById('customFontRow'),
+  fontFileInput: document.getElementById('fontFileInput'),
+  selectFontFileBtn: document.getElementById('selectFontFileBtn'),
+  fontFileName: document.getElementById('fontFileName'),
   marginLine: document.getElementById('marginLine'),
   livePreview: document.getElementById('livePreview'),
+  chaptersToolbar: document.getElementById('chaptersToolbar'),
+  deletedChaptersCount: document.getElementById('deletedChaptersCount'),
+  markSuspectChaptersBtn: document.getElementById('markSuspectChaptersBtn'),
+  keepAllChaptersBtn: document.getElementById('keepAllChaptersBtn'),
+  chaptersList: document.getElementById('chaptersList'),
   imagesToolbar: document.getElementById('imagesToolbar'),
   selectedCount: document.getElementById('selectedCount'),
   selectAllImgsBtn: document.getElementById('selectAllImgsBtn'),
@@ -44,10 +74,30 @@ const els = {
   emptyImagesState: document.getElementById('emptyImagesState'),
   imagesGrid: document.getElementById('imagesGrid'),
   statusText: document.getElementById('statusText'),
-  exportBtn: document.getElementById('exportBtn')
+  exportBtn: document.getElementById('exportBtn'),
+  exportAllBtn: document.getElementById('exportAllBtn')
 };
 
-// Утилиты путей внутри ZIP-архива EPUB
+function loadSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+    return { ...defaultSettings, ...(saved || {}) };
+  } catch {
+    return { ...defaultSettings };
+  }
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(appState.settings));
+  } catch {}
+}
+
+function activeBook() {
+  return appState.books[appState.activeIndex] || null;
+}
+
+// Утилиты
 function resolveZipPath(baseDir, relativeHref) {
   if (!relativeHref) return '';
   const cleanHref = decodeURIComponent(relativeHref.split('#')[0]);
@@ -85,97 +135,166 @@ function isParagraphEmpty(el) {
   return txt.length === 0;
 }
 
-function cleanupObjectUrls() {
-  if (state.cover && state.cover.url) URL.revokeObjectURL(state.cover.url);
-  state.images.forEach(img => {
-    if (img.url) URL.revokeObjectURL(img.url);
+// Умная замена дефисов на длинное тире (—)
+// Не трогает уже стоящие длинные тире (—) и дефисы внутри слов (кто-то, по-моему)
+function applyDashFix(text, isStartOfParagraph = false) {
+  let out = text;
+  let hits = 0;
+
+  if (isStartOfParagraph) {
+    out = out.replace(/^(\s*)(?:--|-|–)(\s+)/, (m, s1, s2) => {
+      hits++;
+      return s1 + '—' + s2;
+    });
+  }
+  out = out.replace(/(\s)(?:--|-|–)(\s)/g, (m, s1, s2) => {
+    hits++;
+    return s1 + '—' + s2;
   });
+  out = out.replace(/--/g, () => {
+    hits++;
+    return '—';
+  });
+
+  return { text: out, hits };
 }
 
-// События загрузки
+function applyTypoFix(text) {
+  let hits = 0;
+  let out = text.replace(/\.{3}/g, () => {
+    hits++;
+    return '…';
+  });
+  out = out.replace(/[ \t]{2,}/g, () => {
+    hits++;
+    return ' ';
+  });
+  return { text: out, hits };
+}
+
+// Безопасная эвристика рекламы/мусора переводчиков (НИКОГДА не удаляет сама, только ставит метку)
+const AD_KEYWORDS = [
+  'реклам', 'об авторе', 'от переводчика', 'примечания переводчика',
+  'поддержать перевод', 'подписаться', 'telegram', 't.me/', 'vk.com',
+  'boosty', 'patreon', 'донат', 'благодарност', 'читайте также',
+  'другие книги', 'книги автора', 'оглавление', 'содержание', 'аннотация'
+];
+
+function detectSuspectChapter(title, text) {
+  const cleanText = (text || '').trim();
+  const lowerAll = (title + ' ' + cleanText.slice(0, 800)).toLowerCase();
+  const charCount = cleanText.length;
+
+  // Длинные сюжетные главы (> 5000 символов) никогда не помечаем как рекламу
+  if (charCount > 5000) return false;
+
+  const hasKeyword = AD_KEYWORDS.some(k => lowerAll.includes(k));
+  const hasUrl = /https?:\/\/|t\.me\/|@[a-z0-9_]{4,}/i.test(cleanText);
+
+  if (hasUrl && charCount < 2500) return true;
+  if (hasKeyword && charCount < 3500) return true;
+  return false;
+}
+
+function isAudioOrVideo(mediaType, path) {
+  const m = (mediaType || '').toLowerCase();
+  const p = (path || '').toLowerCase();
+  if (m.startsWith('audio/') || m.startsWith('video/')) return true;
+  return /\.(mp3|m4a|ogg|wav|aac|flac|mp4|webm|mov|avi)$/.test(p);
+}
+
+function revokeBookUrls(book) {
+  if (book.cover && book.cover.url) URL.revokeObjectURL(book.cover.url);
+  book.images.forEach(img => { if (img.url) URL.revokeObjectURL(img.url); });
+}
+
+// Загрузка файлов (поддержка нескольких книг сразу)
 els.selectFileBtn.addEventListener('click', () => els.fileInput.click());
-els.fileInput.addEventListener('change', (e) => {
-  if (e.target.files && e.target.files[0]) handleFile(e.target.files[0]);
+els.addMoreBtn.addEventListener('click', () => els.fileInput.click());
+
+els.fileInput.addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (!files.length) return;
+
+  els.statusText.textContent = `Читаем файлы (${files.length})...`;
+  const startLen = appState.books.length;
+
+  for (const file of files) {
+    try {
+      const book = await parseAnyBookFile(file);
+      if (book) appState.books.push(book);
+    } catch (err) {
+      console.error(err);
+      alert(`Не удалось прочитать «${file.name}»: ${err.message}`);
+    }
+  }
+
+  if (appState.books.length > 0) {
+    if (startLen === 0) appState.activeIndex = 0;
+    else appState.activeIndex = appState.books.length - 1;
+    renderAll();
+  }
 });
 
 els.resetBtn.addEventListener('click', () => {
-  cleanupObjectUrls();
-  els.fileInput.value = '';
+  appState.books.forEach(revokeBookUrls);
+  appState.books = [];
+  appState.activeIndex = 0;
   els.workspace.classList.add('hidden');
   els.resetBtn.classList.add('hidden');
+  els.addMoreBtn.classList.add('hidden');
   els.dropZone.classList.remove('hidden');
 });
 
-async function handleFile(file) {
-  cleanupObjectUrls();
-  state.images = [];
-  state.cover = null;
-  state.sampleParagraphs = [];
-  state.convertedChapters = [];
-  state.totalChapters = 0;
-  state.totalParagraphs = 0;
-  state.originalName = file.name.replace(/\.(epub|fb2\.zip|fb2|txt)$/i, '');
-
+async function parseAnyBookFile(file) {
   const lower = file.name.toLowerCase();
-  try {
-    if (lower.endsWith('.epub')) {
-      els.formatBadge.textContent = 'EPUB';
-      await parseEpubFile(file);
-    } else if (lower.endsWith('.fb2') || lower.endsWith('.fb2.zip')) {
-      els.formatBadge.textContent = 'FB2 → EPUB';
-      await parseFb2File(file);
-    } else if (lower.endsWith('.txt')) {
-      els.formatBadge.textContent = 'TXT → EPUB';
-      await parseTxtFile(file);
-    } else {
-      alert('Формат не поддерживается. Выберите файл EPUB, FB2 или TXT.');
-      return;
-    }
+  const originalName = file.name.replace(/\.(epub|fb2\.zip|fb2|txt)$/i, '');
 
-    renderWorkspace();
-  } catch (err) {
-    console.error(err);
-    alert('Не удалось прочитать книгу: ' + err.message);
-  }
+  if (lower.endsWith('.epub')) return await parseEpubFile(file, originalName);
+  if (lower.endsWith('.fb2') || lower.endsWith('.fb2.zip')) return await parseFb2File(file, originalName);
+  if (lower.endsWith('.txt')) return await parseTxtFile(file, originalName);
+  throw new Error('Формат не поддерживается (нужен EPUB, FB2 или TXT)');
 }
 
-// Чтение EPUB
-async function parseEpubFile(file) {
-  state.mode = 'epub';
+async function parseEpubFile(file, originalName) {
   const zip = await JSZip.loadAsync(file);
-  state.zip = zip;
-
-  const containerXml = await zip.file('META-INF/container.xml').async('string');
   const parser = new DOMParser();
-  const containerDoc = parser.parseFromString(containerXml, 'application/xml');
-  const rootfile = containerDoc.querySelector('rootfile');
-  state.opfPath = rootfile.getAttribute('full-path');
-  state.opfDir = state.opfPath.includes('/') ? state.opfPath.slice(0, state.opfPath.lastIndexOf('/')) : '';
 
-  const opfXml = await zip.file(state.opfPath).async('string');
-  const opfDoc = parser.parseFromString(opfXml, 'application/xml');
+  const containerEntry = zip.file('META-INF/container.xml');
+  if (!containerEntry) throw new Error('Не найден META-INF/container.xml');
+  const containerDoc = parser.parseFromString(await containerEntry.async('string'), 'application/xml');
+  const opfPath = containerDoc.querySelector('rootfile').getAttribute('full-path');
+  const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/')) : '';
+
+  const opfDoc = parser.parseFromString(await zip.file(opfPath).async('string'), 'application/xml');
 
   const titleNode = opfDoc.getElementsByTagNameNS('*', 'title')[0];
   const creatorNode = opfDoc.getElementsByTagNameNS('*', 'creator')[0];
-  state.title = titleNode ? titleNode.textContent.trim() : state.originalName;
-  state.author = creatorNode ? creatorNode.textContent.trim() : '';
 
-  // Определяем обложку
-  let coverId = null;
+  let series = '';
+  let seriesIndex = '';
   const metas = Array.from(opfDoc.getElementsByTagNameNS('*', 'meta'));
+  let coverId = null;
+
   for (const m of metas) {
-    if (m.getAttribute('name') === 'cover' && m.getAttribute('content')) {
-      coverId = m.getAttribute('content');
-      break;
-    }
+    const name = m.getAttribute('name');
+    const prop = m.getAttribute('property');
+    if (name === 'cover' && m.getAttribute('content')) coverId = m.getAttribute('content');
+    if (name === 'calibre:series') series = m.getAttribute('content') || '';
+    if (name === 'calibre:series_index') seriesIndex = m.getAttribute('content') || '';
+    if (prop === 'belongs-to-collection' && !series) series = (m.textContent || '').trim();
+    if (prop === 'group-position' && !seriesIndex) seriesIndex = (m.textContent || '').trim();
   }
 
   const manifestItems = Array.from(opfDoc.getElementsByTagNameNS('*', 'item'));
+  const itemById = new Map();
+  manifestItems.forEach(it => itemById.set(it.getAttribute('id'), it));
+
   let coverItem = manifestItems.find(it => {
     const props = it.getAttribute('properties') || '';
     return props.split(/\s+/).includes('cover-image') || (coverId && it.getAttribute('id') === coverId);
   });
-
   if (!coverItem) {
     coverItem = manifestItems.find(it => {
       const media = it.getAttribute('media-type') || '';
@@ -184,33 +303,51 @@ async function parseEpubFile(file) {
       return media.startsWith('image/') && (id.includes('cover') || href.includes('cover'));
     });
   }
+  const coverZipPath = coverItem ? resolveZipPath(opfDir, coverItem.getAttribute('href')) : null;
 
-  const coverZipPath = coverItem ? resolveZipPath(state.opfDir, coverItem.getAttribute('href')) : null;
+  const book = {
+    id: Math.random().toString(36).slice(2),
+    mode: 'epub',
+    formatLabel: 'EPUB',
+    originalName,
+    zip,
+    opfPath,
+    opfDir,
+    title: titleNode ? titleNode.textContent.trim() : originalName,
+    author: creatorNode ? creatorNode.textContent.trim() : '',
+    series,
+    seriesIndex,
+    cover: null,
+    images: [],
+    mediaFiles: [], // { id, path, size }
+    chapters: [],   // { id, path, title, snippet, charCount, suspect, markedDelete }
+    sampleParagraphs: [],
+    totalParagraphs: 0,
+    dashHits: 0,
+    typoHits: 0
+  };
 
-  // Сбор изображений и глав
-  const htmlPaths = [];
+  // Сбор картинок и вшитого аудио/видео (включая файлы вне manifest!)
+  const seenMediaPaths = new Set();
+
   for (const item of manifestItems) {
     const media = item.getAttribute('media-type') || '';
     const href = item.getAttribute('href') || '';
-    const fullPath = resolveZipPath(state.opfDir, href);
+    const fullPath = resolveZipPath(opfDir, href);
     const zipEntry = zip.file(fullPath);
     if (!zipEntry) continue;
 
-    if (media.startsWith('image/')) {
+    if (isAudioOrVideo(media, fullPath)) {
+      const u8 = await zipEntry.async('uint8array');
+      book.mediaFiles.push({ id: item.getAttribute('id'), path: fullPath, size: u8.byteLength });
+      seenMediaPaths.add(fullPath);
+    } else if (media.startsWith('image/')) {
       const blob = await zipEntry.async('blob');
       const url = URL.createObjectURL(blob);
       if (fullPath === coverZipPath) {
-        state.cover = {
-          blob,
-          mime: media,
-          url,
-          originalPath: fullPath,
-          id: item.getAttribute('id'),
-          changed: false,
-          removed: false
-        };
+        book.cover = { blob, mime: media, url, originalPath: fullPath, id: item.getAttribute('id'), changed: false, removed: false };
       } else {
-        state.images.push({
+        book.images.push({
           id: item.getAttribute('id'),
           path: fullPath,
           name: fullPath.split('/').pop(),
@@ -221,35 +358,69 @@ async function parseEpubFile(file) {
           markedDelete: false
         });
       }
-    } else if (media.includes('xhtml') || media.includes('html')) {
-      htmlPaths.push(fullPath);
     }
   }
 
-  state.totalChapters = htmlPaths.length;
+  // На случай, если MP3 лежат в архиве без записи в manifest
+  for (const p of Object.keys(zip.files)) {
+    if (zip.files[p].dir || seenMediaPaths.has(p)) continue;
+    if (isAudioOrVideo('', p)) {
+      const u8 = await zip.file(p).async('uint8array');
+      book.mediaFiles.push({ id: null, path: p, size: u8.byteLength });
+      seenMediaPaths.add(p);
+    }
+  }
 
-  // Подсчет абзацев и выборка живого примера текста
-  for (const path of htmlPaths) {
-    const raw = await zip.file(path).async('string');
+  // Читаем главы строго в порядке spine
+  const spineRefs = Array.from(opfDoc.getElementsByTagNameNS('*', 'itemref'));
+  let chIndex = 0;
+
+  for (const ref of spineRefs) {
+    const idref = ref.getAttribute('idref');
+    const item = itemById.get(idref);
+    if (!item) continue;
+    const fullPath = resolveZipPath(opfDir, item.getAttribute('href'));
+    const entry = zip.file(fullPath);
+    if (!entry) continue;
+
+    chIndex++;
+    const raw = await entry.async('string');
     const doc = parser.parseFromString(raw, 'text/html');
+
+    const heading = doc.querySelector('h1, h2, h3, title');
+    const chTitle = (heading && heading.textContent.trim()) || `Раздел ${chIndex}`;
+    const bodyText = (doc.body ? doc.body.textContent : '').replace(/\s+/g, ' ').trim();
+    const snippet = bodyText.slice(0, 110);
+
+    book.chapters.push({
+      id: idref,
+      path: fullPath,
+      title: chTitle,
+      snippet,
+      charCount: bodyText.length,
+      suspect: detectSuspectChapter(chTitle, bodyText),
+      markedDelete: false
+    });
+
     const ps = Array.from(doc.querySelectorAll('p'));
     for (const p of ps) {
-      const text = (p.textContent || '').trim();
-      if (text.length > 0) {
-        state.totalParagraphs++;
-        if (state.sampleParagraphs.length < 5 && text.length > 45) {
-          state.sampleParagraphs.push(p.textContent);
+      const rawText = p.textContent || '';
+      if (rawText.trim().length > 0) {
+        book.totalParagraphs++;
+        book.dashHits += applyDashFix(rawText, true).hits;
+        book.typoHits += applyTypoFix(rawText).hits;
+        if (book.sampleParagraphs.length < 5 && rawText.trim().length > 40) {
+          book.sampleParagraphs.push(rawText);
         }
       }
     }
   }
+
+  return book;
 }
 
-// Чтение и разбор FB2 (включая .fb2.zip)
-async function parseFb2File(file) {
-  state.mode = 'converted';
+async function parseFb2File(file, originalName) {
   let buffer = await file.arrayBuffer();
-
   if (file.name.toLowerCase().endsWith('.zip')) {
     const z = await JSZip.loadAsync(buffer);
     const fb2Entry = Object.values(z.files).find(f => !f.dir && f.name.toLowerCase().endsWith('.fb2'));
@@ -257,8 +428,7 @@ async function parseFb2File(file) {
     buffer = await fb2Entry.async('arraybuffer');
   }
 
-  // Определение кодировки (UTF-8 или Windows-1251)
-  const headAscii = new TextDecoder('ascii').decode(buffer.slice(0, 250));
+  const headAscii = new TextDecoder('ascii').decode(buffer.slice(0, 260));
   const encMatch = headAscii.match(/encoding=["']([^"']+)["']/i);
   const encoding = encMatch ? encMatch[1].toLowerCase() : 'utf-8';
   const xmlText = new TextDecoder(encoding === 'windows-1251' ? 'windows-1251' : 'utf-8').decode(buffer);
@@ -267,19 +437,35 @@ async function parseFb2File(file) {
   const doc = parser.parseFromString(xmlText, 'application/xml');
 
   const bookTitle = doc.querySelector('title-info > book-title');
-  state.title = bookTitle ? bookTitle.textContent.trim() : state.originalName;
-
   const firstName = doc.querySelector('title-info > author > first-name')?.textContent || '';
   const lastName = doc.querySelector('title-info > author > last-name')?.textContent || '';
-  state.author = `${firstName} ${lastName}`.trim();
+  const seqNode = doc.querySelector('title-info > sequence');
+
+  const book = {
+    id: Math.random().toString(36).slice(2),
+    mode: 'converted',
+    formatLabel: 'FB2 → EPUB',
+    originalName,
+    title: bookTitle ? bookTitle.textContent.trim() : originalName,
+    author: `${firstName} ${lastName}`.trim(),
+    series: seqNode ? (seqNode.getAttribute('name') || '') : '',
+    seriesIndex: seqNode ? (seqNode.getAttribute('number') || '') : '',
+    cover: null,
+    images: [],
+    mediaFiles: [],
+    chapters: [],
+    sampleParagraphs: [],
+    totalParagraphs: 0,
+    dashHits: 0,
+    typoHits: 0
+  };
 
   let coverHref = doc.querySelector('title-info > coverpage > image')?.getAttribute('l:href')
     || doc.querySelector('title-info > coverpage > image')?.getAttribute('xlink:href')
     || doc.querySelector('title-info > coverpage > image')?.getAttribute('href') || '';
   if (coverHref.startsWith('#')) coverHref = coverHref.slice(1);
 
-  const binaries = Array.from(doc.getElementsByTagName('binary'));
-  for (const bin of binaries) {
+  for (const bin of Array.from(doc.getElementsByTagName('binary'))) {
     const id = bin.getAttribute('id') || '';
     const mime = bin.getAttribute('content-type') || 'image/jpeg';
     const b64 = (bin.textContent || '').replace(/\s+/g, '');
@@ -291,18 +477,9 @@ async function parseFb2File(file) {
     const url = URL.createObjectURL(blob);
 
     if (id && id === coverHref) {
-      state.cover = { blob, mime, url, originalPath: id, id, changed: false, removed: false };
+      book.cover = { blob, mime, url, originalPath: id, id, changed: false, removed: false };
     } else {
-      state.images.push({
-        id,
-        path: 'images/' + id,
-        name: id,
-        size: blob.size,
-        mime,
-        blob,
-        url,
-        markedDelete: false
-      });
+      book.images.push({ id, path: 'images/' + id, name: id, size: blob.size, mime, blob, url, markedDelete: false });
     }
   }
 
@@ -311,10 +488,11 @@ async function parseFb2File(file) {
 
   targetNodes.forEach((sec, idx) => {
     const titleEl = sec.querySelector(':scope > title');
-    const chTitle = titleEl ? titleEl.textContent.trim() : `Глава ${idx + 1}`;
+    const chTitle = titleEl ? titleEl.textContent.replace(/\s+/g, ' ').trim() : `Глава ${idx + 1}`;
     const lines = [];
     if (titleEl) lines.push(`<h2>${escapeXml(chTitle)}</h2>`);
 
+    let plainAccum = '';
     sec.querySelectorAll('p, empty-line, image').forEach(node => {
       const tag = node.tagName.toLowerCase();
       if (tag === 'empty-line') {
@@ -329,32 +507,55 @@ async function parseFb2File(file) {
         if (node.closest('title')) return;
         const txt = node.textContent || '';
         if (txt.trim().length > 0) {
-          state.totalParagraphs++;
-          if (state.sampleParagraphs.length < 5 && txt.trim().length > 45) {
-            state.sampleParagraphs.push(txt);
+          plainAccum += txt + ' ';
+          book.totalParagraphs++;
+          book.dashHits += applyDashFix(txt, true).hits;
+          book.typoHits += applyTypoFix(txt).hits;
+          if (book.sampleParagraphs.length < 5 && txt.trim().length > 40) {
+            book.sampleParagraphs.push(txt);
           }
         }
         lines.push(`<p>${escapeXml(txt)}</p>`);
       }
     });
 
-    state.convertedChapters.push({ title: chTitle, html: lines.join('\n') });
+    book.chapters.push({
+      id: `ch-${idx + 1}`,
+      title: chTitle,
+      snippet: plainAccum.trim().slice(0, 110),
+      charCount: plainAccum.trim().length,
+      suspect: detectSuspectChapter(chTitle, plainAccum),
+      markedDelete: false,
+      html: lines.join('\n')
+    });
   });
 
-  state.totalChapters = state.convertedChapters.length;
+  return book;
 }
 
-// Чтение TXT
-async function parseTxtFile(file) {
-  state.mode = 'converted';
+async function parseTxtFile(file, originalName) {
   const buffer = await file.arrayBuffer();
   let text = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
-  if (text.includes('\uFFFD')) {
-    text = new TextDecoder('windows-1251').decode(buffer);
-  }
+  if (text.includes('\uFFFD')) text = new TextDecoder('windows-1251').decode(buffer);
 
-  state.title = state.originalName;
-  state.author = '';
+  const book = {
+    id: Math.random().toString(36).slice(2),
+    mode: 'converted',
+    formatLabel: 'TXT → EPUB',
+    originalName,
+    title: originalName,
+    author: '',
+    series: '',
+    seriesIndex: '',
+    cover: null,
+    images: [],
+    mediaFiles: [],
+    chapters: [],
+    sampleParagraphs: [],
+    totalParagraphs: 0,
+    dashHits: 0,
+    typoHits: 0
+  };
 
   const rawLines = text.split(/\r?\n/);
   const htmlLines = [];
@@ -362,39 +563,209 @@ async function parseTxtFile(file) {
     if (line.trim() === '') {
       htmlLines.push('<p class="empty-line"></p>');
     } else {
-      state.totalParagraphs++;
-      if (state.sampleParagraphs.length < 5 && line.trim().length > 45) {
-        state.sampleParagraphs.push(line);
+      book.totalParagraphs++;
+      book.dashHits += applyDashFix(line, true).hits;
+      book.typoHits += applyTypoFix(line).hits;
+      if (book.sampleParagraphs.length < 5 && line.trim().length > 40) {
+        book.sampleParagraphs.push(line);
       }
       htmlLines.push(`<p>${escapeXml(line)}</p>`);
     }
   }
 
-  state.convertedChapters = [{ title: state.title, html: htmlLines.join('\n') }];
-  state.totalChapters = 1;
+  book.chapters.push({
+    id: 'ch-1',
+    title: originalName,
+    snippet: text.replace(/\s+/g, ' ').trim().slice(0, 110),
+    charCount: text.trim().length,
+    suspect: false,
+    markedDelete: false,
+    html: htmlLines.join('\n')
+  });
+
+  return book;
 }
 
-// Отрисовка интерфейса после загрузки книги
-function renderWorkspace() {
+// Синхронизация сохранённых настроек с контролами
+function syncControlsFromSettings() {
+  const s = appState.settings;
+  els.removeIndentToggle.checked = s.removeIndent;
+  els.cleanEmptyToggle.checked = s.cleanEmpty;
+  els.spacingRange.value = s.spacing;
+  els.spacingVal.textContent = Number(s.spacing).toFixed(2) + ' em';
+  els.fixDashesToggle.checked = s.fixDashes;
+  els.fixTypoToggle.checked = s.fixTypo;
+  els.fixDarkModeToggle.checked = s.fixDarkMode;
+  els.stripMediaToggle.checked = s.stripMedia;
+  els.fontSelect.value = s.fontMode;
+  els.alignSelect.value = s.alignMode;
+  els.customFontRow.classList.toggle('hidden', s.fontMode !== 'custom');
+}
+
+syncControlsFromSettings();
+
+function bindSetting(el, key, eventName, transform = v => v) {
+  el.addEventListener(eventName, () => {
+    const val = el.type === 'checkbox' ? el.checked : transform(el.value);
+    appState.settings[key] = val;
+    saveSettings();
+    if (key === 'fontMode') {
+      els.customFontRow.classList.toggle('hidden', val !== 'custom');
+    }
+    renderPreview();
+  });
+}
+
+bindSetting(els.removeIndentToggle, 'removeIndent', 'change');
+bindSetting(els.cleanEmptyToggle, 'cleanEmpty', 'change');
+bindSetting(els.spacingRange, 'spacing', 'input', v => parseFloat(v));
+bindSetting(els.fixDashesToggle, 'fixDashes', 'change');
+bindSetting(els.fixTypoToggle, 'fixTypo', 'change');
+bindSetting(els.fixDarkModeToggle, 'fixDarkMode', 'change');
+bindSetting(els.stripMediaToggle, 'stripMedia', 'change');
+bindSetting(els.fontSelect, 'fontMode', 'change');
+bindSetting(els.alignSelect, 'alignMode', 'change');
+
+// Загрузка пользовательского шрифта (.ttf / .otf / .woff2)
+els.selectFontFileBtn.addEventListener('click', () => els.fontFileInput.click());
+els.fontFileInput.addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const buffer = await file.arrayBuffer();
+  const ext = (file.name.split('.').pop() || 'ttf').toLowerCase();
+  const mimeMap = { ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2' };
+  appState.customFont = {
+    name: file.name,
+    ext,
+    mime: mimeMap[ext] || 'font/ttf',
+    buffer
+  };
+  els.fontFileName.textContent = file.name;
+
+  try {
+    const face = new FontFace('PerepletUserFont', buffer.slice(0));
+    await face.load();
+    document.fonts.add(face);
+  } catch (err) {
+    console.warn('Preview font load failed:', err);
+  }
+  renderPreview();
+});
+
+// Редактирование метаданных активной книги
+els.titleInput.addEventListener('input', () => {
+  const b = activeBook();
+  if (!b) return;
+  b.title = els.titleInput.value;
+  renderQueue();
+});
+els.authorInput.addEventListener('input', () => {
+  const b = activeBook();
+  if (b) b.author = els.authorInput.value;
+});
+els.seriesInput.addEventListener('input', () => {
+  const b = activeBook();
+  if (b) b.series = els.seriesInput.value;
+});
+els.seriesIndexInput.addEventListener('input', () => {
+  const b = activeBook();
+  if (b) b.seriesIndex = els.seriesIndexInput.value;
+});
+
+function renderAll() {
+  const book = activeBook();
+  if (!book) {
+    els.workspace.classList.add('hidden');
+    els.dropZone.classList.remove('hidden');
+    els.resetBtn.classList.add('hidden');
+    els.addMoreBtn.classList.add('hidden');
+    return;
+  }
+
   els.dropZone.classList.add('hidden');
   els.workspace.classList.remove('hidden');
   els.resetBtn.classList.remove('hidden');
+  els.addMoreBtn.classList.remove('hidden');
 
-  els.titleInput.value = state.title;
-  els.authorInput.value = state.author;
-  els.statChapters.textContent = state.totalChapters;
-  els.statParagraphs.textContent = state.totalParagraphs;
-  els.statImages.textContent = state.images.length;
+  renderQueue();
+
+  els.formatBadge.textContent = book.formatLabel;
+  els.titleInput.value = book.title;
+  els.authorInput.value = book.author;
+  els.seriesInput.value = book.series;
+  els.seriesIndexInput.value = book.seriesIndex;
+
+  els.statChapters.textContent = book.chapters.length;
+  els.statParagraphs.textContent = book.totalParagraphs;
+  els.statImages.textContent = book.images.length;
+  els.statMedia.textContent = book.mediaFiles.length;
+
+  // Счётчики находок
+  els.dashCountPill.textContent = book.dashHits > 0 ? `Найдено: ${book.dashHits}` : 'Не найдено';
+  els.dashCountPill.className = 'pill' + (book.dashHits > 0 ? ' has-hits' : '');
+
+  els.typoCountPill.textContent = book.typoHits > 0 ? `Найдено: ${book.typoHits}` : 'Не найдено';
+  els.typoCountPill.className = 'pill' + (book.typoHits > 0 ? ' has-hits' : '');
+
+  if (book.mediaFiles.length > 0) {
+    const totalMediaBytes = book.mediaFiles.reduce((acc, f) => acc + f.size, 0);
+    els.mediaCountPill.textContent = `${book.mediaFiles.length} шт · ${formatBytes(totalMediaBytes)}`;
+    els.mediaCountPill.className = 'pill has-warn';
+  } else {
+    els.mediaCountPill.textContent = 'Нет';
+    els.mediaCountPill.className = 'pill';
+  }
+
+  els.exportAllBtn.classList.toggle('hidden', appState.books.length < 2);
+  if (appState.books.length >= 2) {
+    els.exportAllBtn.textContent = `Все ${appState.books.length} (ZIP)`;
+  }
 
   renderCover();
   renderPreview();
+  renderChaptersList();
   renderImagesGrid();
   els.statusText.textContent = 'Готово к сборке';
 }
 
+function renderQueue() {
+  if (appState.books.length < 2) {
+    els.queuePanel.classList.add('hidden');
+    return;
+  }
+  els.queuePanel.classList.remove('hidden');
+  els.queueTitle.textContent = `Книги в работе (${appState.books.length})`;
+  els.bookTabs.innerHTML = '';
+
+  appState.books.forEach((b, idx) => {
+    const tab = document.createElement('div');
+    tab.className = 'book-tab' + (idx === appState.activeIndex ? ' active' : '');
+    tab.innerHTML = `
+      <span class="book-tab-title">${escapeXml(b.title || b.originalName)}</span>
+      <button class="book-tab-remove" type="button" title="Убрать из списка">×</button>
+    `;
+    tab.addEventListener('click', (e) => {
+      if (e.target.classList.contains('book-tab-remove')) {
+        e.stopPropagation();
+        revokeBookUrls(appState.books[idx]);
+        appState.books.splice(idx, 1);
+        if (appState.activeIndex >= appState.books.length) {
+          appState.activeIndex = Math.max(0, appState.books.length - 1);
+        }
+        renderAll();
+      } else {
+        appState.activeIndex = idx;
+        renderAll();
+      }
+    });
+    els.bookTabs.appendChild(tab);
+  });
+}
+
 function renderCover() {
-  if (state.cover && !state.cover.removed && state.cover.url) {
-    els.coverImg.src = state.cover.url;
+  const book = activeBook();
+  if (book && book.cover && !book.cover.removed && book.cover.url) {
+    els.coverImg.src = book.cover.url;
     els.coverImg.classList.remove('hidden');
     els.coverPlaceholder.classList.add('hidden');
     els.removeCoverBtn.classList.remove('hidden');
@@ -408,15 +779,17 @@ function renderCover() {
 
 els.changeCoverBtn.addEventListener('click', () => els.coverInput.click());
 els.coverInput.addEventListener('change', (e) => {
+  const book = activeBook();
   const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  if (state.cover && state.cover.url) URL.revokeObjectURL(state.cover.url);
-  state.cover = {
+  e.target.value = '';
+  if (!book || !file) return;
+  if (book.cover && book.cover.url) URL.revokeObjectURL(book.cover.url);
+  book.cover = {
     blob: file,
     mime: file.type || 'image/jpeg',
     url: URL.createObjectURL(file),
-    originalPath: state.cover ? state.cover.originalPath : null,
-    id: state.cover ? state.cover.id : null,
+    originalPath: book.cover ? book.cover.originalPath : null,
+    id: book.cover ? book.cover.id : null,
     changed: true,
     removed: false
   };
@@ -424,41 +797,102 @@ els.coverInput.addEventListener('change', (e) => {
 });
 
 els.removeCoverBtn.addEventListener('click', () => {
-  if (state.cover) state.cover.removed = true;
+  const book = activeBook();
+  if (book && book.cover) book.cover.removed = true;
   renderCover();
 });
 
-// Настройки абзацев и превью
 function renderPreview() {
-  const noIndent = els.removeIndentToggle.checked;
-  const gap = parseFloat(els.spacingRange.value);
-  els.spacingVal.textContent = gap.toFixed(2) + ' em';
+  const book = activeBook();
+  const s = appState.settings;
+  els.spacingVal.textContent = Number(s.spacing).toFixed(2) + ' em';
 
-  els.livePreview.style.setProperty('--preview-indent', noIndent ? '0px' : '1.5em');
-  els.livePreview.style.setProperty('--preview-gap', gap + 'em');
-  els.marginLine.style.opacity = noIndent ? '1' : '0.25';
+  els.livePreview.style.setProperty('--preview-indent', s.removeIndent ? '0px' : '1.5em');
+  els.livePreview.style.setProperty('--preview-gap', s.spacing + 'em');
+  els.livePreview.style.setProperty('--preview-align', s.alignMode === 'justify' ? 'justify' : 'left');
+  els.marginLine.style.opacity = s.removeIndent ? '1' : '0.25';
 
-  const samples = state.sampleParagraphs.length > 0
-    ? state.sampleParagraphs
+  let previewFont = 'Georgia, "Times New Roman", serif';
+  if (s.fontMode === 'sans') previewFont = '-apple-system, BlinkMacSystemFont, "Inter", sans-serif';
+  if (s.fontMode === 'custom' && appState.customFont) previewFont = '"PerepletUserFont", Georgia, serif';
+  els.livePreview.style.setProperty('--preview-font', previewFont);
+
+  const samples = (book && book.sampleParagraphs.length > 0)
+    ? book.sampleParagraphs
     : [
-        'Первый абзац текста показывает, как будет выглядеть страница вашей книги после сохранения.',
+        '— Привет! — сказал он, закрывая книгу.',
         'Красная строка убрана в ноль, а между абзацами добавлен аккуратный воздушный интервал.',
-        'Даже если в исходной книге были смешаны разные стили и пустые строки, вёрстка станет единой.'
+        'Даже если в исходной книге были смешаны стили - теперь всё выглядит ровно.'
       ];
 
-  els.livePreview.innerHTML = samples
-    .map(p => `<p>${escapeXml(noIndent ? cleanLeadingSpaces(p) : p)}</p>`)
-    .join('');
+  els.livePreview.innerHTML = samples.map(raw => {
+    let t = s.removeIndent ? cleanLeadingSpaces(raw) : raw;
+    if (s.fixDashes) t = applyDashFix(t, true).text;
+    if (s.fixTypo) t = applyTypoFix(t).text;
+    return `<p>${escapeXml(t)}</p>`;
+  }).join('');
 }
 
-els.removeIndentToggle.addEventListener('change', renderPreview);
-els.cleanEmptyToggle.addEventListener('change', renderPreview);
-els.spacingRange.addEventListener('input', renderPreview);
+// Список глав книги
+function renderChaptersList() {
+  const book = activeBook();
+  els.chaptersList.innerHTML = '';
+  if (!book || book.chapters.length === 0) {
+    els.chaptersToolbar.classList.add('hidden');
+    return;
+  }
 
-// Галерея картинок внутри книги
+  els.chaptersToolbar.classList.remove('hidden');
+  const suspectCount = book.chapters.filter(c => c.suspect).length;
+  els.markSuspectChaptersBtn.disabled = suspectCount === 0;
+  els.markSuspectChaptersBtn.textContent = suspectCount > 0 ? `Отметить рекламу (${suspectCount})` : 'Реклама не найдена';
+
+  book.chapters.forEach((ch, idx) => {
+    const row = document.createElement('div');
+    row.className = 'chapter-row' + (ch.markedDelete ? ' marked-delete' : '');
+    row.innerHTML = `
+      <div class="chapter-info">
+        <div class="chapter-top">
+          <span class="chapter-title">${escapeXml(ch.title)}</span>
+          ${ch.suspect ? '<span class="pill has-warn">Реклама?</span>' : ''}
+        </div>
+        <div class="chapter-snippet">${escapeXml(ch.snippet || 'Пустая страница или только картинка')}</div>
+      </div>
+      <div class="chapter-right">
+        <span class="chapter-chars">${ch.charCount.toLocaleString('ru-RU')} зн.</span>
+        <span class="chapter-state">${ch.markedDelete ? 'Удалить' : 'Оставить'}</span>
+      </div>
+    `;
+    row.addEventListener('click', () => {
+      book.chapters[idx].markedDelete = !book.chapters[idx].markedDelete;
+      renderChaptersList();
+    });
+    els.chaptersList.appendChild(row);
+  });
+
+  const delCount = book.chapters.filter(c => c.markedDelete).length;
+  els.deletedChaptersCount.textContent = `К удалению: ${delCount} из ${book.chapters.length}`;
+}
+
+els.markSuspectChaptersBtn.addEventListener('click', () => {
+  const book = activeBook();
+  if (!book) return;
+  book.chapters.forEach(c => { if (c.suspect) c.markedDelete = true; });
+  renderChaptersList();
+});
+
+els.keepAllChaptersBtn.addEventListener('click', () => {
+  const book = activeBook();
+  if (!book) return;
+  book.chapters.forEach(c => { c.markedDelete = false; });
+  renderChaptersList();
+});
+
+// Сетка картинок
 function renderImagesGrid() {
+  const book = activeBook();
   els.imagesGrid.innerHTML = '';
-  if (state.images.length === 0) {
+  if (!book || book.images.length === 0) {
     els.emptyImagesState.classList.remove('hidden');
     els.imagesToolbar.classList.add('hidden');
     return;
@@ -467,103 +901,189 @@ function renderImagesGrid() {
   els.emptyImagesState.classList.add('hidden');
   els.imagesToolbar.classList.remove('hidden');
 
-  state.images.forEach((img, index) => {
+  book.images.forEach((img, index) => {
     const card = document.createElement('div');
     card.className = 'img-card' + (img.markedDelete ? ' marked-delete' : '');
     card.innerHTML = `
-      <div class="img-thumb-wrap">
-        <img src="${img.url}" loading="lazy" alt="">
-      </div>
+      <div class="img-thumb-wrap"><img src="${img.url}" loading="lazy" alt=""></div>
       <div class="img-meta">
         <span class="img-name" title="${escapeXml(img.name)}">${formatBytes(img.size)}</span>
         <span class="img-status">${img.markedDelete ? 'Удалить' : 'Оставить'}</span>
       </div>
     `;
     card.addEventListener('click', () => {
-      state.images[index].markedDelete = !state.images[index].markedDelete;
+      book.images[index].markedDelete = !book.images[index].markedDelete;
       renderImagesGrid();
     });
     els.imagesGrid.appendChild(card);
   });
 
-  const deletedCount = state.images.filter(i => i.markedDelete).length;
-  els.selectedCount.textContent = `Выбрано на удаление: ${deletedCount} из ${state.images.length}`;
+  const delCount = book.images.filter(i => i.markedDelete).length;
+  els.selectedCount.textContent = `К удалению: ${delCount} из ${book.images.length}`;
 }
 
 els.selectAllImgsBtn.addEventListener('click', () => {
-  state.images.forEach(i => { i.markedDelete = true; });
+  const book = activeBook();
+  if (!book) return;
+  book.images.forEach(i => { i.markedDelete = true; });
   renderImagesGrid();
 });
 
 els.keepAllImgsBtn.addEventListener('click', () => {
-  state.images.forEach(i => { i.markedDelete = false; });
+  const book = activeBook();
+  if (!book) return;
+  book.images.forEach(i => { i.markedDelete = false; });
   renderImagesGrid();
 });
 
-// Единый CSS для вшивания в книгу
-function buildOverrideCss(noIndent, gapEm) {
-  return `
-/* Unslop Book Typography Override */
-p {
-  text-indent: ${noIndent ? '0 !important' : '1.5em'} ;
-  margin-top: 0 !important;
-  margin-bottom: ${gapEm}em !important;
-}
-div.paragraph, .p, .text {
-  text-indent: ${noIndent ? '0 !important' : '1.5em'} ;
-}
-`;
+// Генерация CSS с учётом всех настроек пользователя
+function buildOverrideCss(s, customFontRelUrl) {
+  const rules = [];
+
+  if (s.fontMode === 'custom' && customFontRelUrl) {
+    rules.push(`@font-face { font-family: "PerepletCustom"; src: url("${customFontRelUrl}"); font-weight: normal; font-style: normal; }`);
+    rules.push(`body, p, div, span { font-family: "PerepletCustom", serif !important; }`);
+  } else if (s.fontMode === 'serif') {
+    rules.push(`body, p, div { font-family: Georgia, "PT Serif", "Times New Roman", serif !important; }`);
+  } else if (s.fontMode === 'sans') {
+    rules.push(`body, p, div { font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif !important; }`);
+  } else if (s.fontMode === 'reset') {
+    rules.push(`body, p, div, span { font-family: inherit !important; }`);
+  }
+
+  if (s.fixDarkMode) {
+    rules.push(`html, body, p, div, span, h1, h2, h3, h4, blockquote { color: inherit !important; background-color: transparent !important; }`);
+  }
+
+  const alignRule = s.alignMode === 'justify'
+    ? 'text-align: justify !important;'
+    : s.alignMode === 'left'
+      ? 'text-align: left !important;'
+      : '';
+
+  rules.push(`p { text-indent: ${s.removeIndent ? '0 !important' : '1.5em'}; margin-top: 0 !important; margin-bottom: ${s.spacing}em !important; ${alignRule} }`);
+  rules.push(`div.paragraph, .p, .text { text-indent: ${s.removeIndent ? '0 !important' : '1.5em'}; }`);
+
+  return rules.join('\n');
 }
 
-// Сборка и скачивание готового EPUB
+function processParagraphTextNodes(p, doc, s) {
+  const walker = doc.createTreeWalker(p, NodeFilter.SHOW_TEXT, null);
+  let node;
+  let isFirstText = true;
+  while ((node = walker.nextNode())) {
+    if (!node.nodeValue) continue;
+    let val = node.nodeValue;
+    if (isFirstText) {
+      if (s.removeIndent) val = cleanLeadingSpaces(val);
+      if (s.fixDashes) val = applyDashFix(val, true).text;
+      if (val.trim().length > 0) isFirstText = false;
+    } else {
+      if (s.fixDashes) val = applyDashFix(val, false).text;
+    }
+    if (s.fixTypo) val = applyTypoFix(val).text;
+    node.nodeValue = val;
+  }
+}
+
+function triggerDownload(blob, filename) {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function safeFileName(title) {
+  return (title || 'book').replace(/[\\/:*?"<>|]/g, '').trim() || 'book';
+}
+
+// Экспорт текущей книги
 els.exportBtn.addEventListener('click', async () => {
+  const book = activeBook();
+  if (!book) return;
   els.exportBtn.disabled = true;
-  els.statusText.textContent = 'Собираем чистый EPUB...';
+  els.exportAllBtn.disabled = true;
+  els.statusText.textContent = 'Собираем EPUB...';
 
   try {
-    const newTitle = els.titleInput.value.trim() || 'Без названия';
-    const newAuthor = els.authorInput.value.trim();
-    const noIndent = els.removeIndentToggle.checked;
-    const cleanEmpty = els.cleanEmptyToggle.checked;
-    const gapEm = parseFloat(els.spacingRange.value);
-
-    let outBlob;
-    if (state.mode === 'epub') {
-      outBlob = await exportModifiedEpub({ newTitle, newAuthor, noIndent, cleanEmpty, gapEm });
-    } else {
-      outBlob = await exportFreshEpub({ newTitle, newAuthor, noIndent, cleanEmpty, gapEm });
-    }
-
-    const safeFileName = newTitle.replace(/[\\/:*?"<>|]/g, '').trim() || 'book';
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(outBlob);
-    link.download = `${safeFileName}.epub`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-
-    els.statusText.textContent = 'Файл сохранён';
+    const blob = await buildBookBlob(book, appState.settings);
+    triggerDownload(blob, `${safeFileName(book.title)}.epub`);
+    els.statusText.textContent = 'EPUB сохранён';
   } catch (err) {
     console.error(err);
-    alert('Ошибка при сборке EPUB: ' + err.message);
+    alert('Ошибка сборки: ' + err.message);
     els.statusText.textContent = 'Ошибка сборки';
   } finally {
     els.exportBtn.disabled = false;
+    els.exportAllBtn.disabled = false;
   }
 });
 
-// Модификация существующего EPUB
-async function exportModifiedEpub({ newTitle, newAuthor, noIndent, cleanEmpty, gapEm }) {
-  const zip = state.zip;
+// Пакетный экспорт всех книг в один ZIP
+els.exportAllBtn.addEventListener('click', async () => {
+  if (appState.books.length === 0) return;
+  els.exportBtn.disabled = true;
+  els.exportAllBtn.disabled = true;
+
+  try {
+    const masterZip = new JSZip();
+    const usedNames = new Set();
+
+    for (let i = 0; i < appState.books.length; i++) {
+      const b = appState.books[i];
+      els.statusText.textContent = `Сборка ${i + 1} из ${appState.books.length}...`;
+      const epubBlob = await buildBookBlob(b, appState.settings);
+      let base = safeFileName(b.title || b.originalName);
+      let fname = `${base}.epub`;
+      let counter = 2;
+      while (usedNames.has(fname)) {
+        fname = `${base} (${counter++}).epub`;
+      }
+      usedNames.add(fname);
+      masterZip.file(fname, epubBlob);
+    }
+
+    els.statusText.textContent = 'Упаковываем ZIP...';
+    const zipBlob = await masterZip.generateAsync({ type: 'blob' });
+    triggerDownload(zipBlob, 'pereplet-books.zip');
+    els.statusText.textContent = `Сохранено книг: ${appState.books.length}`;
+  } catch (err) {
+    console.error(err);
+    alert('Ошибка пакетной сборки: ' + err.message);
+    els.statusText.textContent = 'Ошибка сборки';
+  } finally {
+    els.exportBtn.disabled = false;
+    els.exportAllBtn.disabled = false;
+  }
+});
+
+async function buildBookBlob(book, s) {
+  if (book.mode === 'epub') return await exportModifiedEpub(book, s);
+  return await exportFreshEpub(book, s);
+}
+
+// Сборка модифицированного EPUB (не мутирует исходный book.zip, работает с копией)
+async function exportModifiedEpub(book, s) {
   const parser = new DOMParser();
   const serializer = new XMLSerializer();
 
-  const opfXml = await zip.file(state.opfPath).async('string');
-  const opfDoc = parser.parseFromString(opfXml, 'application/xml');
+  // Копируем исходный архив, чтобы книгу можно было пересохранять много раз
+  const rawBuffer = await book.zip.generateAsync({ type: 'arraybuffer' });
+  const zip = await JSZip.loadAsync(rawBuffer);
 
-  // 1. Обновление названия и автора
-  let titleNode = opfDoc.getElementsByTagNameNS('*', 'title')[0];
+  const opfDoc = parser.parseFromString(await zip.file(book.opfPath).async('string'), 'application/xml');
   const metadataNode = opfDoc.getElementsByTagNameNS('*', 'metadata')[0];
+  const manifestNode = opfDoc.getElementsByTagNameNS('*', 'manifest')[0];
+  const spineNode = opfDoc.getElementsByTagNameNS('*', 'spine')[0];
+  const nsUri = opfDoc.documentElement.namespaceURI;
+
+  const newTitle = (book.title || 'Без названия').trim();
+  const newAuthor = (book.author || '').trim();
+
+  // 1. Метаданные (Название, Автор, Серия)
+  let titleNode = opfDoc.getElementsByTagNameNS('*', 'title')[0];
   if (!titleNode && metadataNode) {
     titleNode = opfDoc.createElementNS('http://purl.org/dc/elements/1.1/', 'dc:title');
     metadataNode.appendChild(titleNode);
@@ -579,117 +1099,158 @@ async function exportModifiedEpub({ newTitle, newAuthor, noIndent, cleanEmpty, g
     if (creatorNode) creatorNode.textContent = newAuthor;
   }
 
-  // Также обновим заголовок в toc.ncx, если он есть
+  // Серия (Calibre meta)
+  Array.from(opfDoc.getElementsByTagNameNS('*', 'meta')).forEach(m => {
+    const n = m.getAttribute('name');
+    if (n === 'calibre:series' || n === 'calibre:series_index') m.remove();
+  });
+  if (book.series && book.series.trim() && metadataNode) {
+    const ms = opfDoc.createElementNS(nsUri, 'meta');
+    ms.setAttribute('name', 'calibre:series');
+    ms.setAttribute('content', book.series.trim());
+    metadataNode.appendChild(ms);
+    if (book.seriesIndex && book.seriesIndex.trim()) {
+      const mi = opfDoc.createElementNS(nsUri, 'meta');
+      mi.setAttribute('name', 'calibre:series_index');
+      mi.setAttribute('content', book.seriesIndex.trim());
+      metadataNode.appendChild(mi);
+    }
+  }
+
+  // 2. Удаление отмеченных глав
+  const deletedChIds = new Set(book.chapters.filter(c => c.markedDelete).map(c => c.id));
+  const deletedChPaths = new Set(book.chapters.filter(c => c.markedDelete).map(c => c.path));
+
+  Array.from(opfDoc.getElementsByTagNameNS('*', 'itemref')).forEach(ref => {
+    if (deletedChIds.has(ref.getAttribute('idref'))) ref.remove();
+  });
+  Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).forEach(it => {
+    if (deletedChIds.has(it.getAttribute('id'))) it.remove();
+  });
+  for (const p of deletedChPaths) zip.remove(p);
+
+  // Обновляем toc.ncx (заголовок + убираем удалённые главы)
   const ncxItem = Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).find(
     i => (i.getAttribute('media-type') || '').includes('ncx')
   );
   if (ncxItem) {
-    const ncxPath = resolveZipPath(state.opfDir, ncxItem.getAttribute('href'));
+    const ncxPath = resolveZipPath(book.opfDir, ncxItem.getAttribute('href'));
+    const ncxDir = ncxPath.includes('/') ? ncxPath.slice(0, ncxPath.lastIndexOf('/')) : '';
     if (zip.file(ncxPath)) {
-      const ncxStr = await zip.file(ncxPath).async('string');
-      const ncxDoc = parser.parseFromString(ncxStr, 'application/xml');
+      const ncxDoc = parser.parseFromString(await zip.file(ncxPath).async('string'), 'application/xml');
       const docTitleText = ncxDoc.querySelector('docTitle > text');
-      if (docTitleText) {
-        docTitleText.textContent = newTitle;
-        zip.file(ncxPath, serializer.serializeToString(ncxDoc));
+      if (docTitleText) docTitleText.textContent = newTitle;
+      ncxDoc.querySelectorAll('navPoint').forEach(np => {
+        const content = np.querySelector(':scope > content');
+        if (!content) return;
+        const resolved = resolveZipPath(ncxDir, content.getAttribute('src'));
+        if (deletedChPaths.has(resolved)) np.remove();
+      });
+      zip.file(ncxPath, serializer.serializeToString(ncxDoc));
+    }
+  }
+
+  // 3. Вырезка аудио и видео (MP3, MP4 и др.)
+  if (s.stripMedia && book.mediaFiles.length > 0) {
+    const mediaIds = new Set(book.mediaFiles.map(m => m.id).filter(Boolean));
+    for (const m of book.mediaFiles) zip.remove(m.path);
+    Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).forEach(it => {
+      const fullPath = resolveZipPath(book.opfDir, it.getAttribute('href'));
+      if (mediaIds.has(it.getAttribute('id')) || isAudioOrVideo(it.getAttribute('media-type'), fullPath)) {
+        it.remove();
       }
-    }
+    });
   }
 
-  const manifestNode = opfDoc.getElementsByTagNameNS('*', 'manifest')[0];
-  const spineNode = opfDoc.getElementsByTagNameNS('*', 'spine')[0];
-
-  // 2. Обработка удаления выбранных иллюстраций
-  const deletedPaths = new Set(state.images.filter(i => i.markedDelete).map(i => i.path));
-  const deletedIds = new Set(state.images.filter(i => i.markedDelete).map(i => i.id));
-
-  for (const delPath of deletedPaths) {
-    zip.remove(delPath);
-  }
-
-  Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).forEach(item => {
-    if (deletedIds.has(item.getAttribute('id'))) {
-      item.remove();
-    }
+  // 4. Удаление выбранных картинок
+  const deletedImgPaths = new Set(book.images.filter(i => i.markedDelete).map(i => i.path));
+  const deletedImgIds = new Set(book.images.filter(i => i.markedDelete).map(i => i.id));
+  for (const p of deletedImgPaths) zip.remove(p);
+  Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).forEach(it => {
+    if (deletedImgIds.has(it.getAttribute('id'))) it.remove();
   });
 
-  // 3. Обновление или замена обложки
-  if (state.cover) {
-    if (state.cover.removed && state.cover.originalPath) {
-      zip.remove(state.cover.originalPath);
-      if (state.cover.id) {
-        const cItem = Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).find(i => i.getAttribute('id') === state.cover.id);
+  // 5. Обложка
+  if (book.cover) {
+    if (book.cover.removed && book.cover.originalPath) {
+      zip.remove(book.cover.originalPath);
+      if (book.cover.id) {
+        const cItem = Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).find(i => i.getAttribute('id') === book.cover.id);
         if (cItem) cItem.remove();
       }
-    } else if (state.cover.changed && !state.cover.removed) {
-      const ext = state.cover.mime.includes('png') ? 'png' : state.cover.mime.includes('webp') ? 'webp' : 'jpg';
-      if (state.cover.originalPath) {
-        zip.file(state.cover.originalPath, state.cover.blob);
-        const cItem = Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).find(i => i.getAttribute('id') === state.cover.id);
-        if (cItem) cItem.setAttribute('media-type', state.cover.mime);
+    } else if (book.cover.changed && !book.cover.removed) {
+      const ext = book.cover.mime.includes('png') ? 'png' : book.cover.mime.includes('webp') ? 'webp' : 'jpg';
+      if (book.cover.originalPath) {
+        zip.file(book.cover.originalPath, book.cover.blob);
+        const cItem = Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).find(i => i.getAttribute('id') === book.cover.id);
+        if (cItem) cItem.setAttribute('media-type', book.cover.mime);
       } else {
         const relImgHref = `images/custom-cover.${ext}`;
-        const fullImgPath = resolveZipPath(state.opfDir, relImgHref);
-        zip.file(fullImgPath, state.cover.blob);
+        zip.file(resolveZipPath(book.opfDir, relImgHref), book.cover.blob);
 
-        const imgItem = opfDoc.createElementNS(opfDoc.documentElement.namespaceURI, 'item');
+        const imgItem = opfDoc.createElementNS(nsUri, 'item');
         imgItem.setAttribute('id', 'custom-cover-img');
         imgItem.setAttribute('href', relImgHref);
-        imgItem.setAttribute('media-type', state.cover.mime);
+        imgItem.setAttribute('media-type', book.cover.mime);
         imgItem.setAttribute('properties', 'cover-image');
         manifestNode.appendChild(imgItem);
 
-        const metaCover = opfDoc.createElementNS(opfDoc.documentElement.namespaceURI, 'meta');
+        const metaCover = opfDoc.createElementNS(nsUri, 'meta');
         metaCover.setAttribute('name', 'cover');
         metaCover.setAttribute('content', 'custom-cover-img');
         metadataNode.appendChild(metaCover);
 
-        // Страница обложки в начало книги
         const coverPageHref = 'custom-cover.xhtml';
-        const coverPageFull = resolveZipPath(state.opfDir, coverPageHref);
-        const coverXhtml = `<?xml version="1.0" encoding="utf-8"?>
+        zip.file(resolveZipPath(book.opfDir, coverPageHref), `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head><title>${escapeXml(newTitle)}</title>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>${escapeXml(newTitle)}</title>
 <style>body,html{margin:0;padding:0;height:100%;text-align:center;}img{max-width:100%;max-height:100%;object-fit:contain;}</style>
-</head>
-<body><div><img src="${relImgHref}" alt="Cover"/></div></body>
-</html>`;
-        zip.file(coverPageFull, coverXhtml);
+</head><body><div><img src="${relImgHref}" alt="Cover"/></div></body></html>`);
 
-        const pageItem = opfDoc.createElementNS(opfDoc.documentElement.namespaceURI, 'item');
+        const pageItem = opfDoc.createElementNS(nsUri, 'item');
         pageItem.setAttribute('id', 'custom-cover-page');
         pageItem.setAttribute('href', coverPageHref);
         pageItem.setAttribute('media-type', 'application/xhtml+xml');
         manifestNode.appendChild(pageItem);
 
-        const itemref = opfDoc.createElementNS(opfDoc.documentElement.namespaceURI, 'itemref');
+        const itemref = opfDoc.createElementNS(nsUri, 'itemref');
         itemref.setAttribute('idref', 'custom-cover-page');
         spineNode.insertBefore(itemref, spineNode.firstChild);
       }
     }
   }
 
-  // 4. Добавляем чистый CSS-файл и правим все XHTML главы
-  const cssRelHref = 'unslop-override.css';
-  const cssFullPath = resolveZipPath(state.opfDir, cssRelHref);
-  zip.file(cssFullPath, buildOverrideCss(noIndent, gapEm));
+  // 6. Вшивание пользовательского шрифта (если выбран)
+  let customFontRel = null;
+  if (s.fontMode === 'custom' && appState.customFont) {
+    customFontRel = `fonts/pereplet-custom.${appState.customFont.ext}`;
+    zip.file(resolveZipPath(book.opfDir, customFontRel), appState.customFont.buffer);
+    const fItem = opfDoc.createElementNS(nsUri, 'item');
+    fItem.setAttribute('id', 'pereplet-custom-font');
+    fItem.setAttribute('href', customFontRel);
+    fItem.setAttribute('media-type', appState.customFont.mime);
+    manifestNode.appendChild(fItem);
+  }
 
-  if (!Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).some(i => i.getAttribute('id') === 'unslop-css')) {
-    const cssItem = opfDoc.createElementNS(opfDoc.documentElement.namespaceURI, 'item');
-    cssItem.setAttribute('id', 'unslop-css');
+  // 7. CSS-оверрайд
+  const cssRelHref = 'pereplet-override.css';
+  zip.file(resolveZipPath(book.opfDir, cssRelHref), buildOverrideCss(s, customFontRel));
+  if (!Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).some(i => i.getAttribute('id') === 'pereplet-css')) {
+    const cssItem = opfDoc.createElementNS(nsUri, 'item');
+    cssItem.setAttribute('id', 'pereplet-css');
     cssItem.setAttribute('href', cssRelHref);
     cssItem.setAttribute('media-type', 'text/css');
     manifestNode.appendChild(cssItem);
   }
 
+  // 8. Правка оставшихся XHTML глав
   const htmlItems = Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).filter(item => {
     const m = item.getAttribute('media-type') || '';
     return (m.includes('xhtml') || m.includes('html')) && item.getAttribute('id') !== 'custom-cover-page';
   });
 
   for (const item of htmlItems) {
-    const htmlPath = resolveZipPath(state.opfDir, item.getAttribute('href'));
+    const htmlPath = resolveZipPath(book.opfDir, item.getAttribute('href'));
     const entry = zip.file(htmlPath);
     if (!entry) continue;
 
@@ -703,98 +1264,89 @@ async function exportModifiedEpub({ newTitle, newAuthor, noIndent, cleanEmpty, g
       isXml = false;
     }
 
-    // Удаляем теги удаленных картинок из текста
+    // Удаление тегов аудио/видео
+    if (s.stripMedia) {
+      doc.querySelectorAll('audio, video, source').forEach(el => el.remove());
+    }
+
+    // Удаление отмеченных картинок
     doc.querySelectorAll('img, image').forEach(imgEl => {
       const src = imgEl.getAttribute('src') || imgEl.getAttribute('xlink:href') || imgEl.getAttribute('href') || '';
       const resolved = resolveZipPath(htmlDir, src);
-      if (deletedPaths.has(resolved)) {
+      if (deletedImgPaths.has(resolved)) {
         const parentSvg = imgEl.closest('svg');
         if (parentSvg) parentSvg.remove();
         else imgEl.remove();
       }
     });
 
-    // Чистим абзацы: инлайновые text-indent, ручные пробелы и пустые абзацы
+    // Сброс инлайновых цветов для тёмной темы
+    if (s.fixDarkMode) {
+      doc.querySelectorAll('[style]').forEach(el => {
+        const st = el.getAttribute('style')
+          .replace(/(?:^|;)\s*(?:color|background|background-color)\s*:[^;]+/gi, '')
+          .trim();
+        if (st) el.setAttribute('style', st);
+        else el.removeAttribute('style');
+      });
+    }
+
+    // Правка абзацев
     doc.querySelectorAll('p').forEach(p => {
-      if (cleanEmpty && isParagraphEmpty(p)) {
+      if (s.cleanEmpty && isParagraphEmpty(p)) {
         p.remove();
         return;
       }
       if (p.hasAttribute('style')) {
-        const cleanedStyle = p.getAttribute('style')
+        const st = p.getAttribute('style')
           .replace(/text-indent\s*:[^;]+;?/gi, '')
           .replace(/margin-(top|bottom)\s*:[^;]+;?/gi, '')
           .trim();
-        if (cleanedStyle) p.setAttribute('style', cleanedStyle);
+        if (st) p.setAttribute('style', st);
         else p.removeAttribute('style');
       }
-      if (noIndent) {
-        // Срезаем неразрывные/обычные пробелы в самом начале первого текстового узла абзаца
-        const walker = doc.createTreeWalker(p, NodeFilter.SHOW_TEXT, null);
-        const firstText = walker.nextNode();
-        if (firstText && firstText.nodeValue) {
-          firstText.nodeValue = cleanLeadingSpaces(firstText.nodeValue);
-        }
-      }
+      processParagraphTextNodes(p, doc, s);
     });
 
-    // Вычисляем относительный путь к нашему CSS от текущей главы
     const depth = htmlDir ? htmlDir.split('/').filter(Boolean).length : 0;
-    const opfDepth = state.opfDir ? state.opfDir.split('/').filter(Boolean).length : 0;
+    const opfDepth = book.opfDir ? book.opfDir.split('/').filter(Boolean).length : 0;
     const upLevels = Math.max(0, depth - opfDepth);
-    const relCssFromHtml = '../'.repeat(upLevels) + cssRelHref;
+    const relCss = '../'.repeat(upLevels) + cssRelHref;
 
     const head = doc.querySelector('head');
-    if (head && !head.querySelector('link[data-unslop="1"]')) {
+    if (head && !head.querySelector('link[data-pereplet="1"]')) {
       const linkEl = isXml
         ? doc.createElementNS('http://www.w3.org/1999/xhtml', 'link')
         : doc.createElement('link');
       linkEl.setAttribute('rel', 'stylesheet');
       linkEl.setAttribute('type', 'text/css');
-      linkEl.setAttribute('href', relCssFromHtml);
-      linkEl.setAttribute('data-unslop', '1');
+      linkEl.setAttribute('href', relCss);
+      linkEl.setAttribute('data-pereplet', '1');
       head.appendChild(linkEl);
     }
 
-    const updatedStr = isXml ? serializer.serializeToString(doc) : doc.documentElement.outerHTML;
-    zip.file(htmlPath, updatedStr);
+    zip.file(htmlPath, isXml ? serializer.serializeToString(doc) : doc.documentElement.outerHTML);
   }
 
-  zip.file(state.opfPath, serializer.serializeToString(opfDoc));
+  zip.file(book.opfPath, serializer.serializeToString(opfDoc));
 
-  // По стандарту EPUB файл mimetype обязан идти первым без сжатия
   const outZip = new JSZip();
   outZip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
-
   const allPaths = Object.keys(zip.files).filter(p => p !== 'mimetype' && !zip.files[p].dir);
   for (const p of allPaths) {
-    const content = await zip.file(p).async('uint8array');
-    outZip.file(p, content, { compression: 'DEFLATE' });
+    outZip.file(p, await zip.file(p).async('uint8array'), { compression: 'DEFLATE' });
   }
-
   return await outZip.generateAsync({ type: 'blob', mimeType: 'application/epub+zip' });
 }
 
-// Генерация нового чистого EPUB (для сконвертированных FB2 и TXT)
-async function exportFreshEpub({ newTitle, newAuthor, noIndent, cleanEmpty, gapEm }) {
+// Сборка нового чистого EPUB из FB2 / TXT
+async function exportFreshEpub(book, s) {
   const outZip = new JSZip();
   outZip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
-
   outZip.file('META-INF/container.xml', `<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-  <rootfiles>
-    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
-  </rootfiles>
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
 </container>`);
-
-  const baseCss = `
-body { font-family: serif; line-height: 1.5; margin: 0; padding: 0 4%; }
-h1, h2, h3 { font-weight: 600; margin: 1.2em 0 0.6em; text-indent: 0; }
-.ill-block { text-align: center; margin: 1em 0; }
-.ill-block img { max-width: 100%; height: auto; }
-${buildOverrideCss(noIndent, gapEm)}
-`;
-  outZip.file('OEBPS/style.css', baseCss);
 
   const manifestLines = [
     `<item id="css" href="style.css" media-type="text/css"/>`,
@@ -803,28 +1355,39 @@ ${buildOverrideCss(noIndent, gapEm)}
   const spineLines = [];
   const navPoints = [];
 
-  // Обложка, если задана
-  if (state.cover && !state.cover.removed && state.cover.blob) {
-    const ext = state.cover.mime.includes('png') ? 'png' : 'jpg';
-    outZip.file(`OEBPS/images/cover.${ext}`, state.cover.blob);
-    manifestLines.push(`<item id="cover-img" href="images/cover.${ext}" media-type="${state.cover.mime}" properties="cover-image"/>`);
+  let customFontRel = null;
+  if (s.fontMode === 'custom' && appState.customFont) {
+    customFontRel = `fonts/pereplet-custom.${appState.customFont.ext}`;
+    outZip.file(`OEBPS/${customFontRel}`, appState.customFont.buffer);
+    manifestLines.push(`<item id="custom-font" href="${customFontRel}" media-type="${appState.customFont.mime}"/>`);
+  }
 
+  outZip.file('OEBPS/style.css', `
+body { line-height: 1.5; margin: 0; padding: 0 4%; }
+h1, h2, h3 { font-weight: 600; margin: 1.2em 0 0.6em; text-indent: 0; }
+.ill-block { text-align: center; margin: 1em 0; }
+.ill-block img { max-width: 100%; height: auto; }
+${buildOverrideCss(s, customFontRel)}
+`);
+
+  const newTitle = (book.title || 'Без названия').trim();
+  const newAuthor = (book.author || '').trim();
+
+  if (book.cover && !book.cover.removed && book.cover.blob) {
+    const ext = book.cover.mime.includes('png') ? 'png' : 'jpg';
+    outZip.file(`OEBPS/images/cover.${ext}`, book.cover.blob);
+    manifestLines.push(`<item id="cover-img" href="images/cover.${ext}" media-type="${book.cover.mime}" properties="cover-image"/>`);
     outZip.file('OEBPS/cover.xhtml', `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head><title>${escapeXml(newTitle)}</title>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>${escapeXml(newTitle)}</title>
 <style>body,html{margin:0;padding:0;height:100%;text-align:center;}img{max-width:100%;max-height:100%;}</style>
-</head>
-<body><div><img src="images/cover.${ext}" alt="Cover"/></div></body>
-</html>`);
+</head><body><div><img src="images/cover.${ext}" alt="Cover"/></div></body></html>`);
     manifestLines.push(`<item id="cover-page" href="cover.xhtml" media-type="application/xhtml+xml"/>`);
     spineLines.push(`<itemref idref="cover-page"/>`);
   }
 
-  // Неудаленные картинки
-  const keptImages = state.images.filter(i => !i.markedDelete);
-  const deletedIds = new Set(state.images.filter(i => i.markedDelete).map(i => i.id));
-
+  const keptImages = book.images.filter(i => !i.markedDelete);
+  const deletedImgIds = new Set(book.images.filter(i => i.markedDelete).map(i => i.id));
   keptImages.forEach((img, idx) => {
     outZip.file(`OEBPS/images/${img.id}`, img.blob);
     manifestLines.push(`<item id="img-${idx}" href="images/${escapeXml(img.id)}" media-type="${img.mime}"/>`);
@@ -832,14 +1395,15 @@ ${buildOverrideCss(noIndent, gapEm)}
 
   const parser = new DOMParser();
   const serializer = new XMLSerializer();
+  const activeChapters = book.chapters.filter(c => !c.markedDelete);
 
-  state.convertedChapters.forEach((ch, idx) => {
+  activeChapters.forEach((ch, idx) => {
     const fileId = `ch-${idx + 1}`;
     const fileName = `${fileId}.xhtml`;
-
     const doc = parser.parseFromString(`<div xmlns="http://www.w3.org/1999/xhtml">${ch.html}</div>`, 'application/xml');
+
     doc.querySelectorAll('img[data-img-id]').forEach(el => {
-      if (deletedIds.has(el.getAttribute('data-img-id'))) {
+      if (deletedImgIds.has(el.getAttribute('data-img-id'))) {
         const wrap = el.closest('.ill-block');
         if (wrap) wrap.remove();
         else el.remove();
@@ -849,42 +1413,30 @@ ${buildOverrideCss(noIndent, gapEm)}
     });
 
     doc.querySelectorAll('p').forEach(p => {
-      if (cleanEmpty && (p.classList.contains('empty-line') || isParagraphEmpty(p))) {
+      if (s.cleanEmpty && (p.classList.contains('empty-line') || isParagraphEmpty(p))) {
         p.remove();
         return;
       }
-      if (noIndent && p.firstChild && p.firstChild.nodeType === 3) {
-        p.firstChild.nodeValue = cleanLeadingSpaces(p.firstChild.nodeValue);
-      }
+      processParagraphTextNodes(p, doc, s);
     });
 
-    const bodyInner = Array.from(doc.documentElement.childNodes)
-      .map(n => serializer.serializeToString(n))
-      .join('\n');
-
-    const xhtml = `<?xml version="1.0" encoding="utf-8"?>
+    const bodyInner = Array.from(doc.documentElement.childNodes).map(n => serializer.serializeToString(n)).join('\n');
+    outZip.file(`OEBPS/${fileName}`, `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
-<head>
-  <title>${escapeXml(ch.title)}</title>
-  <link rel="stylesheet" type="text/css" href="style.css"/>
-</head>
-<body>
-${bodyInner}
-</body>
-</html>`;
+<head><title>${escapeXml(ch.title)}</title><link rel="stylesheet" type="text/css" href="style.css"/></head>
+<body>\n${bodyInner}\n</body></html>`);
 
-    outZip.file(`OEBPS/${fileName}`, xhtml);
     manifestLines.push(`<item id="${fileId}" href="${fileName}" media-type="application/xhtml+xml"/>`);
     spineLines.push(`<itemref idref="${fileId}"/>`);
-    navPoints.push(`
-    <navPoint id="nav-${idx + 1}" playOrder="${idx + 1}">
-      <navLabel><text>${escapeXml(ch.title)}</text></navLabel>
-      <content src="${fileName}"/>
-    </navPoint>`);
+    navPoints.push(`<navPoint id="nav-${idx + 1}" playOrder="${idx + 1}"><navLabel><text>${escapeXml(ch.title)}</text></navLabel><content src="${fileName}"/></navPoint>`);
   });
 
   const bookUuid = 'urn:uuid:' + (crypto.randomUUID ? crypto.randomUUID() : Date.now());
+  const seriesMeta = book.series && book.series.trim()
+    ? `<meta name="calibre:series" content="${escapeXml(book.series.trim())}"/>` +
+      (book.seriesIndex && book.seriesIndex.trim() ? `<meta name="calibre:series_index" content="${escapeXml(book.seriesIndex.trim())}"/>` : '')
+    : '';
 
   outZip.file('OEBPS/toc.ncx', `<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
@@ -900,14 +1452,11 @@ ${bodyInner}
     <dc:creator>${escapeXml(newAuthor || 'Неизвестный автор')}</dc:creator>
     <dc:language>ru</dc:language>
     <dc:identifier id="BookId">${bookUuid}</dc:identifier>
-    ${state.cover && !state.cover.removed ? '<meta name="cover" content="cover-img"/>' : ''}
+    ${book.cover && !book.cover.removed ? '<meta name="cover" content="cover-img"/>' : ''}
+    ${seriesMeta}
   </metadata>
-  <manifest>
-    ${manifestLines.join('\n    ')}
-  </manifest>
-  <spine toc="ncx">
-    ${spineLines.join('\n    ')}
-  </spine>
+  <manifest>${manifestLines.join('\n')}</manifest>
+  <spine toc="ncx">${spineLines.join('\n')}</spine>
 </package>`);
 
   return await outZip.generateAsync({ type: 'blob', mimeType: 'application/epub+zip' });

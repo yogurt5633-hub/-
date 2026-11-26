@@ -3,7 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#F6F4EF">
   <title>Переплёт — редактор вёрстки EPUB</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
@@ -14,14 +17,18 @@
         <span class="brand-mark"></span>
         <span class="brand-name">Переплёт</span>
       </div>
-      <button id="resetBtn" class="btn-ghost hidden" type="button">Другой файл</button>
+      <div class="topbar-actions">
+        <button id="addMoreBtn" class="btn-secondary btn-sm hidden" type="button">+ Добавить книги</button>
+        <button id="resetBtn" class="btn-ghost btn-sm hidden" type="button">Очистить</button>
+      </div>
     </div>
   </header>
 
   <main class="container">
+    <input type="file" id="fileInput" accept=".epub,.fb2,.txt,.fb2.zip" multiple hidden>
+
     <!-- Экран загрузки -->
     <section id="dropZone" class="upload-card">
-      <input type="file" id="fileInput" accept=".epub,.fb2,.txt,.fb2.zip" hidden>
       <div class="upload-icon">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/>
@@ -29,15 +36,24 @@
           <path d="m9 10 3-3 3 3"/>
         </svg>
       </div>
-      <h1 class="upload-title">Выберите книгу для правки</h1>
-      <p class="upload-desc">Поддерживаются EPUB, FB2 и TXT. Все форматы сохраняются в чистый EPUB без отправки файла на сервер.</p>
-      <button id="selectFileBtn" class="btn-primary" type="button">Открыть файл</button>
+      <h1 class="upload-title">Выберите одну или несколько книг</h1>
+      <p class="upload-desc">Поддерживаются EPUB, FB2 и TXT. Всё обрабатывается на телефоне и сохраняется в чистый EPUB.</p>
+      <button id="selectFileBtn" class="btn-primary" type="button">Выбрать файлы</button>
     </section>
 
     <!-- Рабочая область -->
     <div id="workspace" class="workspace hidden">
-      
-      <!-- 1. Обложка и метаданные -->
+
+      <!-- Очередь книг (показывается, если загружено больше 1 книги) -->
+      <section id="queuePanel" class="queue-bar hidden">
+        <div class="queue-header">
+          <span id="queueTitle" class="queue-label">Книги в работе</span>
+          <span class="queue-hint">Настройки вёрстки общие для всех</span>
+        </div>
+        <div id="bookTabs" class="book-tabs"></div>
+      </section>
+
+      <!-- 1. Обложка и метаданные текущей книги -->
       <section class="panel">
         <div class="panel-header">
           <h2 class="panel-title">Издание</h2>
@@ -64,6 +80,16 @@
               <span class="field-label">Автор</span>
               <input type="text" id="authorInput" class="input" placeholder="Неизвестный автор">
             </label>
+            <div class="series-grid">
+              <label class="field">
+                <span class="field-label">Серия</span>
+                <input type="text" id="seriesInput" class="input" placeholder="Необязательно">
+              </label>
+              <label class="field">
+                <span class="field-label">№</span>
+                <input type="text" id="seriesIndexInput" class="input" placeholder="1">
+              </label>
+            </div>
             <div class="stats-row">
               <div class="stat-item">
                 <span class="stat-label">Глав</span>
@@ -74,25 +100,30 @@
                 <span id="statParagraphs" class="stat-val">0</span>
               </div>
               <div class="stat-item">
-                <span class="stat-label">Иллюстраций</span>
+                <span class="stat-label">Картинок</span>
                 <span id="statImages" class="stat-val">0</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Аудио</span>
+                <span id="statMedia" class="stat-val">0</span>
               </div>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- 2. Абзацы и живое превью -->
+      <!-- 2. Вёрстка, типографика, шрифт и превью -->
       <section class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">Вёрстка абзацев</h2>
+          <h2 class="panel-title">Вёрстка и типографика</h2>
+          <span class="badge">Сохраняется</span>
         </div>
 
         <div class="controls-list">
           <label class="toggle-row">
             <div class="toggle-text">
               <span class="toggle-title">Убрать красную строку</span>
-              <span class="toggle-sub">Сбрасывает отступ первой строки и удаляет ручные пробелы в начале абзацев</span>
+              <span class="toggle-sub">Сбрасывает отступ первой строки и лишние пробелы в начале абзаца</span>
             </div>
             <input type="checkbox" id="removeIndentToggle" class="checkbox" checked>
           </label>
@@ -112,12 +143,85 @@
             </div>
             <input type="range" id="spacingRange" min="0" max="1.6" step="0.05" value="0.85" class="range">
           </div>
+
+          <div class="divider"></div>
+
+          <label class="toggle-row">
+            <div class="toggle-text">
+              <div class="title-with-pill">
+                <span class="toggle-title">Заменять дефисы на длинное тире (—)</span>
+                <span id="dashCountPill" class="pill">0</span>
+              </div>
+              <span class="toggle-sub">Не трогает слова с дефисом («кто-то») и уже стоящие длинные тире</span>
+            </div>
+            <input type="checkbox" id="fixDashesToggle" class="checkbox" checked>
+          </label>
+
+          <label class="toggle-row">
+            <div class="toggle-text">
+              <div class="title-with-pill">
+                <span class="toggle-title">Убрать двойные пробелы и троеточия</span>
+                <span id="typoCountPill" class="pill">0</span>
+              </div>
+              <span class="toggle-sub">Меняет «...» на «…» и вычищает случайные лишние пробелы</span>
+            </div>
+            <input type="checkbox" id="fixTypoToggle" class="checkbox">
+          </label>
+
+          <label class="toggle-row">
+            <div class="toggle-text">
+              <span class="toggle-title">Починить тёмную тему</span>
+              <span class="toggle-sub">Сбрасывает зашитые цвета текста и белые фоны внутри книги</span>
+            </div>
+            <input type="checkbox" id="fixDarkModeToggle" class="checkbox" checked>
+          </label>
+
+          <label class="toggle-row">
+            <div class="toggle-text">
+              <div class="title-with-pill">
+                <span class="toggle-title">Вырезать вшитое аудио и видео (MP3/MP4)</span>
+                <span id="mediaCountPill" class="pill">Нет</span>
+              </div>
+              <span class="toggle-sub">Удаляет аудиофайлы и плееры, которые переводчики вшивают в EPUB</span>
+            </div>
+            <input type="checkbox" id="stripMediaToggle" class="checkbox" checked>
+          </label>
+
+          <div class="divider"></div>
+
+          <div class="select-grid">
+            <label class="field">
+              <span class="field-label">Шрифт книги</span>
+              <select id="fontSelect" class="input select-input">
+                <option value="keep">Как в книге</option>
+                <option value="reset">Сбросить (выбор читалки)</option>
+                <option value="serif">Книжный (Georgia / Serif)</option>
+                <option value="sans">Без засечек (Sans-serif)</option>
+                <option value="custom">Свой файл (.ttf / .otf)</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span class="field-label">Выравнивание</span>
+              <select id="alignSelect" class="input select-input">
+                <option value="keep">Как в книге</option>
+                <option value="justify">По ширине</option>
+                <option value="left">По левому краю</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="customFontRow" class="custom-font-row hidden">
+            <input type="file" id="fontFileInput" accept=".ttf,.otf,.woff,.woff2" hidden>
+            <button id="selectFontFileBtn" class="btn-secondary btn-sm" type="button">Загрузить шрифт</button>
+            <span id="fontFileName" class="font-file-name">Файл не выбран</span>
+          </div>
         </div>
 
         <div class="preview-wrapper">
           <div class="preview-bar">
-            <span>Фрагмент текста из книги</span>
-            <span class="preview-guide-label">Линия левого поля · 0 px</span>
+            <span>Фрагмент текста</span>
+            <span class="preview-guide-label">Линия поля · 0 px</span>
           </div>
           <div class="paper-sheet">
             <div id="marginLine" class="margin-line"></div>
@@ -126,17 +230,37 @@
         </div>
       </section>
 
-      <!-- 3. Иллюстрации в книге -->
+      <!-- 3. Главы книги (безопасное удаление рекламы/мусора) -->
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">Главы и страницы</h2>
+            <p class="panel-sub">Сюжетные главы не удаляются сами. Нажмите на рекламную страницу, чтобы вырезать её</p>
+          </div>
+        </div>
+
+        <div id="chaptersToolbar" class="images-toolbar hidden">
+          <span id="deletedChaptersCount" class="selection-counter">К удалению: 0</span>
+          <div class="toolbar-btns">
+            <button id="markSuspectChaptersBtn" class="btn-secondary btn-sm" type="button">Отметить рекламу</button>
+            <button id="keepAllChaptersBtn" class="btn-ghost btn-sm" type="button">Оставить все</button>
+          </div>
+        </div>
+
+        <div id="chaptersList" class="chapters-list"></div>
+      </section>
+
+      <!-- 4. Иллюстрации в книге -->
       <section class="panel">
         <div class="panel-header">
           <div>
             <h2 class="panel-title">Иллюстрации внутри текста</h2>
-            <p class="panel-sub">Нажмите на картинку, чтобы отметить её на удаление (обложка настраивается выше)</p>
+            <p class="panel-sub">Нажмите на картинку, чтобы отметить её на удаление (обложка настраивается сверху)</p>
           </div>
         </div>
 
         <div id="imagesToolbar" class="images-toolbar hidden">
-          <span id="selectedCount" class="selection-counter">Выбрано на удаление: 0</span>
+          <span id="selectedCount" class="selection-counter">К удалению: 0</span>
           <div class="toolbar-btns">
             <button id="selectAllImgsBtn" class="btn-secondary btn-sm" type="button">Отметить все</button>
             <button id="keepAllImgsBtn" class="btn-ghost btn-sm" type="button">Оставить все</button>
@@ -152,14 +276,17 @@
         <div class="action-info">
           <span id="statusText" class="status-text">Готово к сборке</span>
         </div>
-        <button id="exportBtn" class="btn-primary btn-export" type="button">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="7 10 12 15 17 10"/>
-            <line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          <span>Скачать EPUB</span>
-        </button>
+        <div class="action-buttons">
+          <button id="exportBtn" class="btn-primary" type="button">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <span>Скачать EPUB</span>
+          </button>
+          <button id="exportAllBtn" class="btn-secondary hidden" type="button">Все (ZIP)</button>
+        </div>
       </div>
 
     </div>
