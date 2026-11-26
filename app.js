@@ -2193,6 +2193,34 @@ function appendNcxPageList(ncxDoc, entries) {
   ncxDoc.documentElement.appendChild(pageList);
 }
 
+
+function stripConflictingCssRules(cssText, s) {
+  let out = cssText || '';
+  if (s.removeIndent) {
+    out = out.replace(/text-indent\s*:[^;{}]+;?/gi, 'text-indent: 0px;');
+  }
+  if (s.fixDarkMode) {
+    out = out.replace(/(?:^|[;{\s])(color|background|background-color)\s*:[^;{}]+;?/gi, '');
+  }
+  if (s.fontMode && s.fontMode !== 'keep') {
+    out = out.replace(/font-family\s*:[^;{}]+;?/gi, '');
+  }
+  if (s.alignMode && s.alignMode !== 'keep') {
+    out = out.replace(/text-align\s*:[^;{}]+;?/gi, '');
+  }
+  return out;
+}
+
+function buildInlineParagraphStyle(s) {
+  const parts = [];
+  parts.push(s.removeIndent ? 'text-indent: 0px !important' : 'text-indent: 1.5em !important');
+  parts.push('margin-top: 0px !important');
+  parts.push(`margin-bottom: ${s.spacing}em !important`);
+  if (s.alignMode === 'justify') parts.push('text-align: justify !important');
+  else if (s.alignMode === 'left') parts.push('text-align: left !important');
+  return parts.join('; ') + ';';
+}
+
 function buildOverrideCss(s, customFontRelUrl) {
   const rules = [];
 
@@ -2217,7 +2245,7 @@ function buildOverrideCss(s, customFontRelUrl) {
       ? 'text-align: left !important;'
       : '';
 
-  rules.push(`p, .pereplet-p { text-indent: ${s.removeIndent ? '0 !important' : '1.5em'}; margin-top: 0 !important; margin-bottom: ${s.spacing}em !important; ${alignRule} }`);
+  rules.push(`html body p, body p, p, p[class], .pereplet-p, div.p { text-indent: ${s.removeIndent ? '0px !important' : '1.5em !important'}; margin-top: 0px !important; margin-bottom: ${s.spacing}em !important; ${alignRule} }`);
   rules.push(`div.paragraph, .p, .text { text-indent: ${s.removeIndent ? '0 !important' : '1.5em'}; }`);
 
   return rules.join('\n');
@@ -2509,6 +2537,15 @@ async function exportModifiedEpub(book, s) {
     manifestNode.appendChild(fItem);
   }
 
+  // 7. Очищаем родные CSS-файлы книги от старой красной строки/цветов + делаем оверрайд
+  for (const p of Object.keys(zip.files)) {
+    if (!zip.files[p].dir && p.toLowerCase().endsWith('.css')) {
+      const oldCss = await zip.file(p).async('string');
+      zip.file(p, stripConflictingCssRules(oldCss, s));
+    }
+  }
+  const overrideCssText = buildOverrideCss(s, customFontRel);
+  const inlinePStyle = buildInlineParagraphStyle(s);
   // 7. CSS-оверрайд
   const cssRelHref = 'pereplet-override.css';
   zip.file(resolveZipPath(book.opfDir, cssRelHref), buildOverrideCss(s, customFontRel));
@@ -2606,14 +2643,16 @@ async function exportModifiedEpub(book, s) {
         return;
       }
       if (p.tagName && p.tagName.toLowerCase() === 'div') p.classList.add('pereplet-p');
+      let existingSt = '';
       if (p.hasAttribute('style')) {
-        const st = p.getAttribute('style')
+        existingSt = p.getAttribute('style')
           .replace(/text-indent\s*:[^;]+;?/gi, '')
           .replace(/margin-(top|bottom)\s*:[^;]+;?/gi, '')
+          .replace(/text-align\s*:[^;]+;?/gi, '')
           .trim();
-        if (st) p.setAttribute('style', st);
-        else p.removeAttribute('style');
+        if (existingSt && !existingSt.endsWith(';')) existingSt += '; ';
       }
+      p.setAttribute('style', existingSt + inlinePStyle);
       processParagraphTextNodes(p, doc, s);
     });
 
@@ -2630,15 +2669,26 @@ async function exportModifiedEpub(book, s) {
     const relCss = '../'.repeat(upLevels) + cssRelHref;
 
     const head = doc.querySelector('head');
-    if (head && !head.querySelector('link[data-pereplet="1"]')) {
-      const linkEl = isXml
-        ? doc.createElementNS('http://www.w3.org/1999/xhtml', 'link')
-        : doc.createElement('link');
-      linkEl.setAttribute('rel', 'stylesheet');
-      linkEl.setAttribute('type', 'text/css');
-      linkEl.setAttribute('href', relCss);
-      linkEl.setAttribute('data-pereplet', '1');
-      head.appendChild(linkEl);
+    if (head) {
+      if (!head.querySelector('link[data-pereplet="1"]')) {
+        const linkEl = isXml
+          ? doc.createElementNS('http://www.w3.org/1999/xhtml', 'link')
+          : doc.createElement('link');
+        linkEl.setAttribute('rel', 'stylesheet');
+        linkEl.setAttribute('type', 'text/css');
+        linkEl.setAttribute('href', relCss);
+        linkEl.setAttribute('data-pereplet', '1');
+        head.appendChild(linkEl);
+      }
+      if (!head.querySelector('style[data-pereplet="1"]')) {
+        const styleEl = isXml
+          ? doc.createElementNS('http://www.w3.org/1999/xhtml', 'style')
+          : doc.createElement('style');
+        styleEl.setAttribute('type', 'text/css');
+        styleEl.setAttribute('data-pereplet', '1');
+        styleEl.textContent = overrideCssText;
+        head.appendChild(styleEl);
+      }
     }
 
     zip.file(htmlPath, isXml ? serializer.serializeToString(doc) : doc.documentElement.outerHTML);
@@ -2785,6 +2835,7 @@ ${buildOverrideCss(s, customFontRel)}
         p.remove();
         return;
       }
+      p.setAttribute('style', buildInlineParagraphStyle(s));
       processParagraphTextNodes(p, doc, s);
     });
     if (s.popupFootnotes !== false) {
