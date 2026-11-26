@@ -90,6 +90,21 @@
                 <input type="text" id="seriesIndexInput" class="input" placeholder="1">
               </label>
             </div>
+            <div class="field">
+              <div class="field-label-row">
+                <span class="field-label">Аннотация (описание)</span>
+                <div class="inline-actions">
+                  <button id="findDescBtn" class="btn-link" type="button">Найти в сети</button>
+                  <span class="dot-sep">·</span>
+                  <button id="translateDescBtn" class="btn-link" type="button">Перевести на рус.</button>
+                </div>
+              </div>
+              <textarea id="descInput" class="textarea" rows="4" placeholder="Описание отсутствует. Нажмите «Найти в сети» или введите текст..."></textarea>
+              <label class="inline-check">
+                <input type="checkbox" id="insertDescPageToggle" class="checkbox-sm" checked>
+                <span>Добавить страницу с аннотацией в начало книги</span>
+              </label>
+            </div>
             <div class="stats-row">
               <div class="stat-item">
                 <span class="stat-label">Глав</span>

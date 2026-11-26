@@ -8,6 +8,7 @@ const defaultSettings = {
   fixTypo: false,
   fixDarkMode: true,
   stripMedia: true,
+  insertDescPage: true,
   kindlePages: true,
   fontMode: 'keep',
   alignMode: 'keep'
@@ -40,6 +41,10 @@ const els = {
   authorInput: document.getElementById('authorInput'),
   seriesInput: document.getElementById('seriesInput'),
   seriesIndexInput: document.getElementById('seriesIndexInput'),
+  descInput: document.getElementById('descInput'),
+  findDescBtn: document.getElementById('findDescBtn'),
+  translateDescBtn: document.getElementById('translateDescBtn'),
+  insertDescPageToggle: document.getElementById('insertDescPageToggle'),
   statChapters: document.getElementById('statChapters'),
   statParagraphs: document.getElementById('statParagraphs'),
   statImages: document.getElementById('statImages'),
@@ -274,6 +279,8 @@ async function parseEpubFile(file, originalName) {
 
   const titleNode = opfDoc.getElementsByTagNameNS('*', 'title')[0];
   const creatorNode = opfDoc.getElementsByTagNameNS('*', 'creator')[0];
+  const descNode = opfDoc.getElementsByTagNameNS('*', 'description')[0];
+  const cleanExistingDesc = descNode ? descNode.textContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
 
   let series = '';
   let seriesIndex = '';
@@ -320,6 +327,7 @@ async function parseEpubFile(file, originalName) {
     author: creatorNode ? creatorNode.textContent.trim() : '',
     series,
     seriesIndex,
+    description: cleanExistingDesc,
     cover: null,
     images: [],
     mediaFiles: [], // { id, path, size }
@@ -443,6 +451,8 @@ async function parseFb2File(file, originalName) {
   const firstName = doc.querySelector('title-info > author > first-name')?.textContent || '';
   const lastName = doc.querySelector('title-info > author > last-name')?.textContent || '';
   const seqNode = doc.querySelector('title-info > sequence');
+  const annotNode = doc.querySelector('title-info > annotation');
+  const fb2Desc = annotNode ? annotNode.textContent.replace(/\s+/g, ' ').trim() : '';
 
   const book = {
     id: Math.random().toString(36).slice(2),
@@ -453,6 +463,7 @@ async function parseFb2File(file, originalName) {
     author: `${firstName} ${lastName}`.trim(),
     series: seqNode ? (seqNode.getAttribute('name') || '') : '',
     seriesIndex: seqNode ? (seqNode.getAttribute('number') || '') : '',
+    description: fb2Desc,
     cover: null,
     images: [],
     mediaFiles: [],
@@ -550,6 +561,7 @@ async function parseTxtFile(file, originalName) {
     author: '',
     series: '',
     seriesIndex: '',
+    description: '',
     cover: null,
     images: [],
     mediaFiles: [],
@@ -600,6 +612,7 @@ function syncControlsFromSettings() {
   els.fixTypoToggle.checked = s.fixTypo;
   els.fixDarkModeToggle.checked = s.fixDarkMode;
   els.stripMediaToggle.checked = s.stripMedia;
+  if (els.insertDescPageToggle) els.insertDescPageToggle.checked = s.insertDescPage !== false;
   if (els.kindlePagesToggle) els.kindlePagesToggle.checked = s.kindlePages !== false;
   els.fontSelect.value = s.fontMode;
   els.alignSelect.value = s.alignMode;
@@ -627,6 +640,7 @@ bindSetting(els.fixDashesToggle, 'fixDashes', 'change');
 bindSetting(els.fixTypoToggle, 'fixTypo', 'change');
 bindSetting(els.fixDarkModeToggle, 'fixDarkMode', 'change');
 bindSetting(els.stripMediaToggle, 'stripMedia', 'change');
+  if (els.insertDescPageToggle) bindSetting(els.insertDescPageToggle, 'insertDescPage', 'change');
   if (els.kindlePagesToggle) bindSetting(els.kindlePagesToggle, 'kindlePages', 'change');
 bindSetting(els.fontSelect, 'fontMode', 'change');
 bindSetting(els.alignSelect, 'alignMode', 'change');
@@ -677,6 +691,157 @@ els.seriesIndexInput.addEventListener('input', () => {
   if (b) b.seriesIndex = els.seriesIndexInput.value;
 });
 
+
+if (els.descInput) {
+  els.descInput.addEventListener('input', () => {
+    const b = activeBook();
+    if (b) b.description = els.descInput.value;
+  });
+}
+
+function stripHtmlTags(raw) {
+  if (!raw) return '';
+  const doc = new DOMParser().parseFromString(raw, 'text/html');
+  return (doc.body.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+function hasCyrillic(text) {
+  const cyr = (text.match(/[а-яёА-ЯЁ]/g) || []).length;
+  return cyr > text.length * 0.15;
+}
+
+async function translateToRussian(text) {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return '';
+  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ru&dt=t&q=' + encodeURIComponent(trimmed);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Сервис перевода временно недоступен');
+  const data = await res.json();
+  return (data[0] || []).map(part => part[0]).join('');
+}
+
+async function searchBookDescriptionOnline(title, author) {
+  const cleanTitle = (title || '').replace(/[_\-]+/g, ' ').trim();
+  const cleanAuthor = (author || '').trim();
+  if (!cleanTitle) throw new Error('Укажите название книги для поиска');
+
+  const queries = [];
+  if (cleanAuthor) {
+    queries.push(`intitle:${cleanTitle} inauthor:${cleanAuthor}`);
+    queries.push(`${cleanTitle} ${cleanAuthor}`);
+  }
+  queries.push(cleanTitle);
+
+  // 1. Ищем в Google Books API
+  for (const q of queries) {
+    try {
+      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=8`;
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const items = data.items || [];
+      // Сначала ищем русское описание, если нет — берём самое подробное на любом языке
+      let bestDesc = '';
+      for (const item of items) {
+        const raw = item.volumeInfo && item.volumeInfo.description;
+        const clean = stripHtmlTags(raw);
+        if (clean.length > 60) {
+          if (hasCyrillic(clean)) return clean;
+          if (clean.length > bestDesc.length) bestDesc = clean;
+        }
+      }
+      if (bestDesc) return bestDesc;
+    } catch (e) {
+      console.warn('Google Books query error:', e);
+    }
+  }
+
+  // 2. Резервный поиск в OpenLibrary
+  try {
+    const q = cleanAuthor ? `${cleanTitle} ${cleanAuthor}` : cleanTitle;
+    const res = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&limit=5`);
+    if (res.ok) {
+      const data = await res.json();
+      for (const doc of (data.docs || [])) {
+        if (!doc.key) continue;
+        const wRes = await fetch(`https://openlibrary.org${doc.key}.json`);
+        if (!wRes.ok) continue;
+        const wData = await wRes.json();
+        const rawDesc = typeof wData.description === 'string'
+          ? wData.description
+          : (wData.description && wData.description.value) || '';
+        const clean = stripHtmlTags(rawDesc);
+        if (clean.length > 50) return clean;
+      }
+    }
+  } catch (e) {
+    console.warn('OpenLibrary fallback error:', e);
+  }
+
+  return '';
+}
+
+if (els.findDescBtn) {
+  els.findDescBtn.addEventListener('click', async () => {
+    const book = activeBook();
+    if (!book) return;
+    const origLabel = els.findDescBtn.textContent;
+    els.findDescBtn.disabled = true;
+    els.findDescBtn.textContent = 'Ищем...';
+    els.statusText.textContent = 'Ищем описание книги в сети...';
+
+    try {
+      let found = await searchBookDescriptionOnline(book.title, book.author);
+      if (!found) {
+        alert('По этому названию описание не нашлось. Попробуйте уточнить оригинальное название книги или имя автора.');
+        els.statusText.textContent = 'Описание не найдено';
+        return;
+      }
+      if (!hasCyrillic(found)) {
+        els.findDescBtn.textContent = 'Переводим...';
+        els.statusText.textContent = 'Переводим найденную аннотацию на русский...';
+        found = await translateToRussian(found);
+      }
+      book.description = found;
+      els.descInput.value = found;
+      els.statusText.textContent = 'Аннотация найдена и подставлена';
+    } catch (err) {
+      alert('Ошибка поиска: ' + err.message);
+      els.statusText.textContent = 'Ошибка поиска';
+    } finally {
+      els.findDescBtn.disabled = false;
+      els.findDescBtn.textContent = origLabel;
+    }
+  });
+}
+
+if (els.translateDescBtn) {
+  els.translateDescBtn.addEventListener('click', async () => {
+    const book = activeBook();
+    if (!book) return;
+    const current = els.descInput.value.trim();
+    if (!current) {
+      alert('Сначала нажмите «Найти в сети» или вставьте текст для перевода.');
+      return;
+    }
+    const origLabel = els.translateDescBtn.textContent;
+    els.translateDescBtn.disabled = true;
+    els.translateDescBtn.textContent = 'Переводим...';
+
+    try {
+      const translated = await translateToRussian(current);
+      book.description = translated;
+      els.descInput.value = translated;
+      els.statusText.textContent = 'Аннотация переведена на русский';
+    } catch (err) {
+      alert('Не удалось перевести: ' + err.message);
+    } finally {
+      els.translateDescBtn.disabled = false;
+      els.translateDescBtn.textContent = origLabel;
+    }
+  });
+}
+
 function renderAll() {
   const book = activeBook();
   if (!book) {
@@ -699,6 +864,7 @@ function renderAll() {
   els.authorInput.value = book.author;
   els.seriesInput.value = book.series;
   els.seriesIndexInput.value = book.seriesIndex;
+  if (els.descInput) els.descInput.value = book.description || '';
 
   els.statChapters.textContent = book.chapters.length;
   els.statParagraphs.textContent = book.totalParagraphs;
@@ -1178,6 +1344,17 @@ async function exportModifiedEpub(book, s) {
     }
   }
 
+    // Аннотация (dc:description + опциональная страница в начале книги)
+  const descText = (book.description || '').trim();
+  let descNode = opfDoc.getElementsByTagNameNS('*', 'description')[0];
+  if (descText) {
+    if (!descNode && metadataNode) {
+      descNode = opfDoc.createElementNS('http://purl.org/dc/elements/1.1/', 'dc:description');
+      metadataNode.appendChild(descNode);
+    }
+    if (descNode) descNode.textContent = descText;
+  }
+
   // 2. Удаление отмеченных глав
   const deletedChIds = new Set(book.chapters.filter(c => c.markedDelete).map(c => c.id));
   const deletedChPaths = new Set(book.chapters.filter(c => c.markedDelete).map(c => c.path));
@@ -1302,6 +1479,35 @@ async function exportModifiedEpub(book, s) {
     cssItem.setAttribute('href', cssRelHref);
     cssItem.setAttribute('media-type', 'text/css');
     manifestNode.appendChild(cssItem);
+  }
+
+    if (descText && s.insertDescPage !== false) {
+    const annotHref = 'pereplet-annotation.xhtml';
+    const annotFull = resolveZipPath(book.opfDir, annotHref);
+    const pars = descText.split(/\r?\n+/).filter(Boolean).map(p => `<p>${escapeXml(p)}</p>`).join('\n');
+    const annotXhtml = `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Аннотация</title>
+<link rel="stylesheet" type="text/css" href="${cssRelHref}"/>
+</head><body><h2>Аннотация</h2>\n${pars}\n</body></html>`;
+    zip.file(annotFull, annotXhtml);
+
+    if (!Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).some(i => i.getAttribute('id') === 'pereplet-annot-page')) {
+      const aItem = opfDoc.createElementNS(nsUri, 'item');
+      aItem.setAttribute('id', 'pereplet-annot-page');
+      aItem.setAttribute('href', annotHref);
+      aItem.setAttribute('media-type', 'application/xhtml+xml');
+      manifestNode.appendChild(aItem);
+
+      const aRef = opfDoc.createElementNS(nsUri, 'itemref');
+      aRef.setAttribute('idref', 'pereplet-annot-page');
+      const firstRef = spineNode.firstElementChild;
+      if (firstRef && (firstRef.getAttribute('idref') || '').includes('cover')) {
+        spineNode.insertBefore(aRef, firstRef.nextSibling);
+      } else {
+        spineNode.insertBefore(aRef, firstRef);
+      }
+    }
   }
 
   // 8. Правка оставшихся XHTML глав
@@ -1463,6 +1669,17 @@ ${buildOverrideCss(s, customFontRel)}
     spineLines.push(`<itemref idref="cover-page"/>`);
   }
 
+    const descText = (book.description || '').trim();
+  if (descText && s.insertDescPage !== false) {
+    const pars = descText.split(/\r?\n+/).filter(Boolean).map(p => `<p>${escapeXml(p)}</p>`).join('\n');
+    outZip.file('OEBPS/annotation.xhtml', `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Аннотация</title><link rel="stylesheet" type="text/css" href="style.css"/></head>
+<body><h2>Аннотация</h2>\n${pars}\n</body></html>`);
+    manifestLines.push(`<item id="annot-page" href="annotation.xhtml" media-type="application/xhtml+xml"/>`);
+    spineLines.push(`<itemref idref="annot-page"/>`);
+  }
+
   const keptImages = book.images.filter(i => !i.markedDelete);
   const deletedImgIds = new Set(book.images.filter(i => i.markedDelete).map(i => i.id));
   keptImages.forEach((img, idx) => {
@@ -1530,6 +1747,7 @@ ${buildOverrideCss(s, customFontRel)}
     <dc:title>${escapeXml(newTitle)}</dc:title>
     <dc:creator>${escapeXml(newAuthor || 'Неизвестный автор')}</dc:creator>
     <dc:language>ru</dc:language>
+    ${descText ? `<dc:description>${escapeXml(descText)}</dc:description>` : ''}
     <dc:identifier id="BookId">${bookUuid}</dc:identifier>
     ${book.cover && !book.cover.removed ? '<meta name="cover" content="cover-img"/>' : ''}
     ${seriesMeta}
