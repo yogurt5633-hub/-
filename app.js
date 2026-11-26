@@ -2616,12 +2616,6 @@ async function exportModifiedEpub(book, s) {
       }
       processParagraphTextNodes(p, doc, s);
     });
-    if (s.popupFootnotes !== false) {
-      upgradeDocFootnotesToKindlePopup(doc, true, idx + 1);
-    }
-    if (s.kindlePages !== false) {
-      injectKindlePageAnchors(doc, true, fileName, kindleState);
-    }
 
     if (s.popupFootnotes !== false) {
       upgradeDocFootnotesToKindlePopup(doc, isXml, item.getAttribute('id') || 'ch');
@@ -2793,6 +2787,12 @@ ${buildOverrideCss(s, customFontRel)}
       }
       processParagraphTextNodes(p, doc, s);
     });
+    if (s.popupFootnotes !== false) {
+      upgradeDocFootnotesToKindlePopup(doc, true, idx + 1);
+    }
+    if (s.kindlePages !== false) {
+      injectKindlePageAnchors(doc, true, fileName, kindleState);
+    }
 
     const bodyInner = Array.from(doc.documentElement.childNodes).map(n => serializer.serializeToString(n)).join('\n');
     outZip.file(`OEBPS/${fileName}`, `<?xml version="1.0" encoding="utf-8"?>
