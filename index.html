@@ -91,6 +91,10 @@
                 <input type="text" id="seriesIndexInput" class="input" placeholder="1">
               </label>
             </div>
+            <label class="inline-check">
+              <input type="checkbox" id="kindleSeriesTitleToggle" class="checkbox-sm" checked>
+              <span>Добавить <b>[Серия #01]</b> в начало названия для сортировки на Kindle</span>
+            </label>
             <div class="field">
               <div class="field-label-row">
                 <span class="field-label">Аннотация (описание)</span>
@@ -210,6 +214,41 @@
               <span class="toggle-sub">Сбрасывает зашитые цвета текста и белые фоны внутри книги</span>
             </div>
             <input type="checkbox" id="fixDarkModeToggle" class="checkbox" checked>
+          </label>
+
+          <label class="toggle-row">
+            <div class="toggle-text">
+              <div class="title-with-pill">
+                <span class="toggle-title">Всплывающие сноски на Kindle (Pop-up)</span>
+                <span id="footnotesCountPill" class="pill">0</span>
+              </div>
+              <span class="toggle-sub">Превращает ссылки-сноски и «(Прим. пер.: ...)» во всплывающие окошки</span>
+            </div>
+            <input type="checkbox" id="popupFootnotesToggle" class="checkbox" checked>
+          </label>
+
+          <label class="toggle-row">
+            <div class="toggle-text">
+              <span class="toggle-title">Мягкие переносы и защита предлогов</span>
+              <span class="toggle-sub">Убирает дыры между словами на Kindle и приклеивает предлоги (в, на, и, не)</span>
+            </div>
+            <input type="checkbox" id="hyphenateToggle" class="checkbox" checked>
+          </label>
+
+          <label class="toggle-row">
+            <div class="toggle-text">
+              <span class="toggle-title">Починить оглавление для прогресс-бара Kindle</span>
+              <span class="toggle-sub">Находит «Глава 1», «Пролог», «Эпилог» в тексте и собирает точки глав</span>
+            </div>
+            <input type="checkbox" id="rebuildTocToggle" class="checkbox" checked>
+          </label>
+
+          <label class="toggle-row">
+            <div class="toggle-text">
+              <span class="toggle-title">Сжать тяжёлые картинки (для Send to Kindle)</span>
+              <span class="toggle-sub">Оптимизирует иллюстрации до 1200px, чтобы книга легко проходила лимит 50 МБ</span>
+            </div>
+            <input type="checkbox" id="compressImagesToggle" class="checkbox">
           </label>
 
           <label class="toggle-row">

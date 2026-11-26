@@ -8,6 +8,11 @@ const defaultSettings = {
   fixTypo: false,
   fixDarkMode: true,
   stripMedia: true,
+  kindleSeriesTitle: true,
+  popupFootnotes: true,
+  hyphenate: true,
+  rebuildToc: true,
+  compressImages: false,
   insertDescPage: true,
   kindlePages: true,
   fontMode: 'keep',
@@ -68,6 +73,12 @@ const els = {
   typoCountPill: document.getElementById('typoCountPill'),
   fixDarkModeToggle: document.getElementById('fixDarkModeToggle'),
   stripMediaToggle: document.getElementById('stripMediaToggle'),
+  kindleSeriesTitleToggle: document.getElementById('kindleSeriesTitleToggle'),
+  popupFootnotesToggle: document.getElementById('popupFootnotesToggle'),
+  footnotesCountPill: document.getElementById('footnotesCountPill'),
+  hyphenateToggle: document.getElementById('hyphenateToggle'),
+  rebuildTocToggle: document.getElementById('rebuildTocToggle'),
+  compressImagesToggle: document.getElementById('compressImagesToggle'),
   kindlePagesToggle: document.getElementById('kindlePagesToggle'),
   kindlePagesPill: document.getElementById('kindlePagesPill'),
   mediaCountPill: document.getElementById('mediaCountPill'),
@@ -345,7 +356,8 @@ async function parseEpubFile(file, originalName) {
     sampleParagraphs: [],
     totalParagraphs: 0,
     dashHits: 0,
-    typoHits: 0
+    typoHits: 0,
+    footnoteHits: 0
   };
 
   // Сбор картинок и вшитого аудио/видео (включая файлы вне manifest!)
@@ -408,8 +420,8 @@ async function parseEpubFile(file, originalName) {
     const raw = await entry.async('string');
     const doc = parser.parseFromString(raw, 'text/html');
 
-    const heading = doc.querySelector('h1, h2, h3, title');
-    const chTitle = (heading && heading.textContent.trim()) || `Раздел ${chIndex}`;
+    const chTitle = detectSmartChapterTitle(doc, chIndex);
+    book.footnoteHits = (book.footnoteHits || 0) + countFootnotesInDoc(doc);
     const bodyText = (doc.body ? doc.body.textContent : '').replace(/\s+/g, ' ').trim();
     const snippet = bodyText.slice(0, 110);
 
@@ -483,7 +495,8 @@ async function parseFb2File(file, originalName) {
     sampleParagraphs: [],
     totalParagraphs: 0,
     dashHits: 0,
-    typoHits: 0
+    typoHits: 0,
+    footnoteHits: 0
   };
 
   let coverHref = doc.querySelector('title-info > coverpage > image')?.getAttribute('l:href')
@@ -537,6 +550,8 @@ async function parseFb2File(file, originalName) {
           book.totalParagraphs++;
           book.dashHits += applyDashFix(txt, true).hits;
           book.typoHits += applyTypoFix(txt).hits;
+          const fnM = txt.match(INLINE_NOTE_RE);
+          if (fnM) book.footnoteHits = (book.footnoteHits || 0) + fnM.length;
           if (book.sampleParagraphs.length < 5 && txt.trim().length > 40) {
             book.sampleParagraphs.push(txt);
           }
@@ -581,12 +596,38 @@ async function parseTxtFile(file, originalName) {
     sampleParagraphs: [],
     totalParagraphs: 0,
     dashHits: 0,
-    typoHits: 0
+    typoHits: 0,
+    footnoteHits: 0
   };
 
   const rawLines = text.split(/\r?\n/);
-  const htmlLines = [];
+  let currentChTitle = originalName;
+  let htmlLines = [];
+  let chPlainAccum = '';
+
+  function flushTxtChapter() {
+    if (!htmlLines.length) return;
+    book.chapters.push({
+      id: `ch-${book.chapters.length + 1}`,
+      title: currentChTitle,
+      snippet: chPlainAccum.trim().slice(0, 110),
+      charCount: chPlainAccum.trim().length,
+      suspect: detectSuspectChapter(currentChTitle, chPlainAccum),
+      markedDelete: false,
+      html: htmlLines.join('\n')
+    });
+    htmlLines = [];
+    chPlainAccum = '';
+  }
+
   for (const line of rawLines) {
+    const trimmedLine = line.trim();
+    if (trimmedLine.length >= 4 && trimmedLine.length <= 80 && CHAPTER_HEADING_RE.test(trimmedLine) && htmlLines.length > 5) {
+      flushTxtChapter();
+      currentChTitle = trimmedLine;
+      htmlLines.push(`<h2>${escapeXml(trimmedLine)}</h2>`);
+      continue;
+    }
     if (line.trim() === '') {
       htmlLines.push('<p class="empty-line"></p>');
     } else {
@@ -596,19 +637,14 @@ async function parseTxtFile(file, originalName) {
       if (book.sampleParagraphs.length < 5 && line.trim().length > 40) {
         book.sampleParagraphs.push(line);
       }
+      chPlainAccum += line + ' ';
+      const mNotes = line.match(INLINE_NOTE_RE);
+      if (mNotes) book.footnoteHits += mNotes.length;
       htmlLines.push(`<p>${escapeXml(line)}</p>`);
     }
   }
 
-  book.chapters.push({
-    id: 'ch-1',
-    title: originalName,
-    snippet: text.replace(/\s+/g, ' ').trim().slice(0, 110),
-    charCount: text.trim().length,
-    suspect: false,
-    markedDelete: false,
-    html: htmlLines.join('\n')
-  });
+  flushTxtChapter();
 
   return book;
 }
@@ -624,6 +660,11 @@ function syncControlsFromSettings() {
   els.fixTypoToggle.checked = s.fixTypo;
   els.fixDarkModeToggle.checked = s.fixDarkMode;
   els.stripMediaToggle.checked = s.stripMedia;
+  if (els.kindleSeriesTitleToggle) els.kindleSeriesTitleToggle.checked = s.kindleSeriesTitle !== false;
+  if (els.popupFootnotesToggle) els.popupFootnotesToggle.checked = s.popupFootnotes !== false;
+  if (els.hyphenateToggle) els.hyphenateToggle.checked = s.hyphenate !== false;
+  if (els.rebuildTocToggle) els.rebuildTocToggle.checked = s.rebuildToc !== false;
+  if (els.compressImagesToggle) els.compressImagesToggle.checked = !!s.compressImages;
   if (els.insertDescPageToggle) els.insertDescPageToggle.checked = s.insertDescPage !== false;
   if (els.kindlePagesToggle) els.kindlePagesToggle.checked = s.kindlePages !== false;
   els.fontSelect.value = s.fontMode;
@@ -652,6 +693,11 @@ bindSetting(els.fixDashesToggle, 'fixDashes', 'change');
 bindSetting(els.fixTypoToggle, 'fixTypo', 'change');
 bindSetting(els.fixDarkModeToggle, 'fixDarkMode', 'change');
 bindSetting(els.stripMediaToggle, 'stripMedia', 'change');
+  if (els.kindleSeriesTitleToggle) bindSetting(els.kindleSeriesTitleToggle, 'kindleSeriesTitle', 'change');
+  if (els.popupFootnotesToggle) bindSetting(els.popupFootnotesToggle, 'popupFootnotes', 'change');
+  if (els.hyphenateToggle) bindSetting(els.hyphenateToggle, 'hyphenate', 'change');
+  if (els.rebuildTocToggle) bindSetting(els.rebuildTocToggle, 'rebuildToc', 'change');
+  if (els.compressImagesToggle) bindSetting(els.compressImagesToggle, 'compressImages', 'change');
   if (els.insertDescPageToggle) bindSetting(els.insertDescPageToggle, 'insertDescPage', 'change');
   if (els.kindlePagesToggle) bindSetting(els.kindlePagesToggle, 'kindlePages', 'change');
 bindSetting(els.fontSelect, 'fontMode', 'change');
@@ -1032,6 +1078,11 @@ function renderAll() {
 
   els.typoCountPill.textContent = book.typoHits > 0 ? `Найдено: ${book.typoHits}` : 'Не найдено';
   els.typoCountPill.className = 'pill' + (book.typoHits > 0 ? ' has-hits' : '');
+  if (els.footnotesCountPill) {
+    const fHits = book.footnoteHits || 0;
+    els.footnotesCountPill.textContent = fHits > 0 ? `Найдено: ${fHits}` : '0';
+    els.footnotesCountPill.className = 'pill' + (fHits > 0 ? ' has-hits' : '');
+  }
 
   if (book.mediaFiles.length > 0) {
     const totalMediaBytes = book.mediaFiles.reduce((acc, f) => acc + f.size, 0);
@@ -1495,6 +1546,200 @@ els.keepAllImgsBtn.addEventListener('click', () => {
 
 // Генерация CSS с учётом всех настроек пользователя
 
+
+const INLINE_NOTE_RE = /(?:\(|\[)\s*(?:прим\.?\s*(?:пер|переводчика|авт|автора|ред)?\.?|п\/?п)\s*[:\-—]?\s*([^\)\]]{3,600})(?:\)|\])/gi;
+const CHAPTER_HEADING_RE = /^(?:глава|часть|пролог|эпилог|интерлюдия|экстра|бонус|послесловие|предисловие|акт|том|chapter|part|prologue|epilogue)\b[^.!?]{0,70}$/i;
+
+function countFootnotesInDoc(doc) {
+  let count = 0;
+  doc.querySelectorAll('a[href*="#"]').forEach(a => {
+    const t = (a.textContent || '').trim();
+    if (/^(?:\[?\d+\]?|\*+|примечание|сноска)$/i.test(t) || a.closest('sup')) count++;
+  });
+  const bodyTxt = doc.body ? (doc.body.textContent || '') : '';
+  const inlineMatches = bodyTxt.match(INLINE_NOTE_RE);
+  if (inlineMatches) count += inlineMatches.length;
+  return count;
+}
+
+function detectSmartChapterTitle(doc, fallbackIndex) {
+  const h = doc.querySelector('h1, h2, h3');
+  if (h) {
+    const ht = h.textContent.replace(/\s+/g, ' ').trim();
+    if (ht && !/^(?:section|split|part|ch|doc|index|page)_?\d*$/i.test(ht)) return ht;
+  }
+  const ps = Array.from(doc.querySelectorAll('p')).slice(0, 8);
+  for (const p of ps) {
+    const pt = (p.textContent || '').replace(/\s+/g, ' ').trim();
+    if (pt.length >= 4 && pt.length <= 85 && CHAPTER_HEADING_RE.test(pt)) {
+      return pt;
+    }
+  }
+  const t = doc.querySelector('title');
+  if (t) {
+    const tt = t.textContent.replace(/\s+/g, ' ').trim();
+    if (tt && !/^(?:section|split|part|ch|doc|index|page|untitled|без названия)_?\d*$/i.test(tt)) return tt;
+  }
+  return `Раздел ${fallbackIndex}`;
+}
+
+// Русские слоговые мягкие переносы (­) + неразрывные предлоги ( )
+const RU_VOWELS = 'аеёиоуыэюяАЕЁИОУЫЭЮЯ';
+const RU_CONS = 'бвгджзклмнпрстфхцчшщБВГДЖЗКЛМНПРСТФХЦЧШЩ';
+const SHY = '­';
+const NBSP = ' ';
+
+function hyphenateRussianWord(word) {
+  if (word.length < 7) return word;
+  let out = '';
+  for (let i = 0; i < word.length; i++) {
+    out += word[i];
+    if (i < 2 || i >= word.length - 3) continue;
+    const cur = word[i];
+    const next = word[i + 1];
+    const next2 = word[i + 2] || '';
+    if ('ьъыЬЪЫ'.includes(next)) continue;
+    if (RU_VOWELS.includes(cur) && RU_VOWELS.includes(next)) {
+      out += SHY;
+    } else if (RU_VOWELS.includes(cur) && RU_CONS.includes(next) && RU_VOWELS.includes(next2)) {
+      out += SHY;
+    } else if (RU_CONS.includes(cur) && RU_CONS.includes(next) && RU_VOWELS.includes(word[i - 1] || '') && (RU_VOWELS.includes(next2) || RU_CONS.includes(next2))) {
+      out += SHY;
+    }
+  }
+  return out;
+}
+
+function applyRussianHyphenationAndNbsp(text) {
+  let out = text;
+  // 1. Приклеиваем короткие предлоги и союзы к следующему слову
+  out = out.replace(/(^|[\s«„(\u00A0])(в|во|к|ко|с|со|у|о|об|обо|и|а|но|да|не|ни|на|по|за|из|от|до|ан|же|бы|ли)\s+(?=\S)/gi, '$1$2' + NBSP);
+  // 2. Приклеиваем частицы бы, же, ли к предыдущему слову
+  out = out.replace(/([а-яёА-ЯЁ])\s+(бы|б|же|ж|ли|ль)(?=[\s.,!?;:»")]|$)/gi, '$1' + NBSP + '$2');
+  // 3. Мягкие переносы длинных русских слов
+  out = out.replace(/[а-яёА-ЯЁ]{7,}/g, (w) => hyphenateRussianWord(w));
+  return out;
+}
+
+// Превращение обычных и инлайновых сносок переводчика "(Прим. пер.: ...)" во всплывающие Pop-up сноски Kindle
+function upgradeDocFootnotesToKindlePopup(doc, isXml, chapIdx) {
+  const nsEpub = 'http://www.idpf.org/2007/ops';
+  const htmlNs = 'http://www.w3.org/1999/xhtml';
+  if (isXml && doc.documentElement) {
+    doc.documentElement.setAttribute('xmlns:epub', nsEpub);
+  }
+
+  // 1. Апгрейд существующих ссылок-сносок <a href="#note1">[1]</a>
+  doc.querySelectorAll('a[href*="#"]').forEach(a => {
+    const txt = (a.textContent || '').trim();
+    if (!(/^(?:\[?\d+\]?|\*+|примечание|сноска)$/i.test(txt) || a.closest('sup'))) return;
+    a.setAttribute('epub:type', 'noteref');
+    a.setAttribute('role', 'doc-noteref');
+    const href = a.getAttribute('href') || '';
+    const hashIdx = href.indexOf('#');
+    if (hashIdx !== -1) {
+      const targetId = href.slice(hashIdx + 1);
+      const targetEl = doc.getElementById(targetId);
+      if (targetEl) {
+        targetEl.setAttribute('epub:type', 'footnote');
+        targetEl.setAttribute('role', 'doc-footnote');
+      }
+    }
+  });
+
+  // 2. Превращение внутритекстовых примечаний "(Прим. пер.: текст)" в компактный значок [п/п] + всплывающий <aside>
+  let inlineCounter = 0;
+  const createdAsides = [];
+
+  doc.querySelectorAll('p').forEach(p => {
+    const rawHtml = p.innerHTML;
+    if (!/(?:прим|п\/?п)/i.test(rawHtml)) return;
+    const replacedHtml = rawHtml.replace(INLINE_NOTE_RE, (fullMatch, noteBody) => {
+      inlineCounter++;
+      const noteId = `kpopup-fn-${chapIdx}-${inlineCounter}`;
+      createdAsides.push({ id: noteId, text: noteBody.trim() });
+      return `<sup><a href="#${noteId}" epub:type="noteref" role="doc-noteref">[п/п ${inlineCounter}]</a></sup>`;
+    });
+    if (replacedHtml !== rawHtml) {
+      try {
+        p.innerHTML = replacedHtml;
+      } catch {}
+    }
+  });
+
+  if (createdAsides.length > 0 && doc.body) {
+    const container = isXml ? doc.createElementNS(htmlNs, 'div') : doc.createElement('div');
+    container.setAttribute('style', 'margin-top:2em;border-top:1px solid #ccc;padding-top:0.5em;font-size:0.88em;');
+    createdAsides.forEach((item, idx) => {
+      const aside = isXml ? doc.createElementNS(htmlNs, 'aside') : doc.createElement('aside');
+      aside.setAttribute('id', item.id);
+      aside.setAttribute('epub:type', 'footnote');
+      aside.setAttribute('role', 'doc-footnote');
+      const p = isXml ? doc.createElementNS(htmlNs, 'p') : doc.createElement('p');
+      p.textContent = `[п/п ${idx + 1}] ${item.text}`;
+      aside.appendChild(p);
+      container.appendChild(aside);
+    });
+    doc.body.appendChild(container);
+  }
+}
+
+// Сжатие тяжёлых картинок под экран Kindle (макс. 1200px, JPEG 0.8)
+async function compressImageBlobForKindle(blob, mime) {
+  if (blob.size < 140 * 1024) return { blob, mime };
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(blob);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const maxDim = 1200;
+      let w = img.naturalWidth || img.width;
+      let h = img.naturalHeight || img.height;
+      if (w > maxDim || h > maxDim) {
+        if (w > h) {
+          h = Math.round((h * maxDim) / w);
+          w = maxDim;
+        } else {
+          w = Math.round((w * maxDim) / h);
+          h = maxDim;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      canvas.toBlob((outBlob) => {
+        if (outBlob && outBlob.size < blob.size) {
+          resolve({ blob: outBlob, mime: 'image/jpeg' });
+        } else {
+          resolve({ blob, mime });
+        }
+      }, 'image/jpeg', 0.80);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve({ blob, mime });
+    };
+    img.src = url;
+  });
+}
+
+function formatKindleBookTitle(rawTitle, series, seriesIndex, enabled) {
+  const cleanTitle = (rawTitle || 'Без названия').trim();
+  const cleanSeries = (series || '').trim();
+  if (!enabled || !cleanSeries) return cleanTitle;
+  if (cleanTitle.startsWith('[')) return cleanTitle;
+  let numStr = '';
+  if (seriesIndex && String(seriesIndex).trim()) {
+    const rawNum = String(seriesIndex).trim();
+    numStr = /^\d+$/.test(rawNum) ? ` #${rawNum.padStart(2, '0')}` : ` #${rawNum}`;
+  }
+  return `[${cleanSeries}${numStr}] ${cleanTitle}`;
+}
+
 const CHARS_PER_KINDLE_PAGE = 1800;
 
 function injectKindlePageAnchors(doc, isXml, relHrefFromOpf, stateObj) {
@@ -1589,6 +1834,7 @@ function processParagraphTextNodes(p, doc, s) {
       if (s.fixDashes) val = applyDashFix(val, false).text;
     }
     if (s.fixTypo) val = applyTypoFix(val).text;
+    if (s.hyphenate !== false) val = applyRussianHyphenationAndNbsp(val);
     node.nodeValue = val;
   }
 }
@@ -1686,7 +1932,7 @@ async function exportModifiedEpub(book, s) {
   const spineNode = opfDoc.getElementsByTagNameNS('*', 'spine')[0];
   const nsUri = opfDoc.documentElement.namespaceURI;
 
-  const newTitle = (book.title || 'Без названия').trim();
+  const newTitle = formatKindleBookTitle(book.title, book.series, book.seriesIndex, s.kindleSeriesTitle !== false);
   const newAuthor = (book.author || '').trim();
 
   // 1. Метаданные (Название, Автор, Серия)
@@ -1787,6 +2033,14 @@ async function exportModifiedEpub(book, s) {
   Array.from(opfDoc.getElementsByTagNameNS('*', 'item')).forEach(it => {
     if (deletedImgIds.has(it.getAttribute('id'))) it.remove();
   });
+
+    if (s.compressImages) {
+    for (const img of book.images) {
+      if (img.markedDelete) continue;
+      const comp = await compressImageBlobForKindle(img.blob, img.mime);
+      zip.file(img.path, comp.blob);
+    }
+  }
 
   // 5. Обложка
   if (book.cover) {
@@ -1955,10 +2209,16 @@ async function exportModifiedEpub(book, s) {
       }
       processParagraphTextNodes(p, doc, s);
     });
+    if (s.popupFootnotes !== false) {
+      upgradeDocFootnotesToKindlePopup(doc, true, idx + 1);
+    }
     if (s.kindlePages !== false) {
       injectKindlePageAnchors(doc, true, fileName, kindleState);
     }
 
+    if (s.popupFootnotes !== false) {
+      upgradeDocFootnotesToKindlePopup(doc, isXml, item.getAttribute('id') || 'ch');
+    }
     if (s.kindlePages !== false) {
       injectKindlePageAnchors(doc, isXml, item.getAttribute('href'), kindleState);
     }
@@ -1983,11 +2243,40 @@ async function exportModifiedEpub(book, s) {
     zip.file(htmlPath, isXml ? serializer.serializeToString(doc) : doc.documentElement.outerHTML);
   }
 
-  if (s.kindlePages !== false && kindleState.entries.length > 0 && ncxItem) {
+  if (ncxItem) {
     const ncxPath = resolveZipPath(book.opfDir, ncxItem.getAttribute('href'));
+    const ncxDir = ncxPath.includes('/') ? ncxPath.slice(0, ncxPath.lastIndexOf('/')) : '';
     if (zip.file(ncxPath)) {
       const ncxDoc = parser.parseFromString(await zip.file(ncxPath).async('string'), 'application/xml');
-      appendNcxPageList(ncxDoc, kindleState.entries);
+      const nsNcx = ncxDoc.documentElement.namespaceURI || 'http://www.daisy.org/z3986/2005/ncx/';
+      if (s.rebuildToc !== false) {
+        const navMap = ncxDoc.getElementsByTagNameNS('*', 'navMap')[0];
+        if (navMap) {
+          navMap.innerHTML = '';
+          const keptChs = book.chapters.filter(c => !c.markedDelete);
+          keptChs.forEach((ch, idx) => {
+            const np = ncxDoc.createElementNS(nsNcx, 'navPoint');
+            np.setAttribute('id', `nav-${idx + 1}`);
+            np.setAttribute('playOrder', String(idx + 1));
+            const nl = ncxDoc.createElementNS(nsNcx, 'navLabel');
+            const tx = ncxDoc.createElementNS(nsNcx, 'text');
+            tx.textContent = ch.title || `Глава ${idx + 1}`;
+            nl.appendChild(tx);
+            const ct = ncxDoc.createElementNS(nsNcx, 'content');
+            // Вычисляем путь относительно папки ncx
+            const relFromOpf = ch.path.startsWith(book.opfDir ? book.opfDir + '/' : '')
+              ? ch.path.slice(book.opfDir ? book.opfDir.length + 1 : 0)
+              : ch.path;
+            ct.setAttribute('src', relFromOpf);
+            np.appendChild(nl);
+            np.appendChild(ct);
+            navMap.appendChild(np);
+          });
+        }
+      }
+      if (s.kindlePages !== false && kindleState.entries.length > 0) {
+        appendNcxPageList(ncxDoc, kindleState.entries);
+      }
       zip.file(ncxPath, serializer.serializeToString(ncxDoc));
     }
   }
@@ -2033,7 +2322,7 @@ h1, h2, h3 { font-weight: 600; margin: 1.2em 0 0.6em; text-indent: 0; }
 ${buildOverrideCss(s, customFontRel)}
 `);
 
-  const newTitle = (book.title || 'Без названия').trim();
+  const newTitle = formatKindleBookTitle(book.title, book.series, book.seriesIndex, s.kindleSeriesTitle !== false);
   const newAuthor = (book.author || '').trim();
 
   if (book.cover && !book.cover.removed && book.cover.blob) {
@@ -2062,10 +2351,12 @@ ${buildOverrideCss(s, customFontRel)}
 
   const keptImages = book.images.filter(i => !i.markedDelete);
   const deletedImgIds = new Set(book.images.filter(i => i.markedDelete).map(i => i.id));
-  keptImages.forEach((img, idx) => {
-    outZip.file(`OEBPS/images/${img.id}`, img.blob);
-    manifestLines.push(`<item id="img-${idx}" href="images/${escapeXml(img.id)}" media-type="${img.mime}"/>`);
-  });
+  for (let idx = 0; idx < keptImages.length; idx++) {
+    const img = keptImages[idx];
+    const finalImg = s.compressImages ? await compressImageBlobForKindle(img.blob, img.mime) : { blob: img.blob, mime: img.mime };
+    outZip.file(`OEBPS/images/${img.id}`, finalImg.blob);
+    manifestLines.push(`<item id="img-${idx}" href="images/${escapeXml(img.id)}" media-type="${finalImg.mime}"/>`);
+  }
 
   const parser = new DOMParser();
   const serializer = new XMLSerializer();
