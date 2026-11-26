@@ -8,6 +8,7 @@ const defaultSettings = {
   fixTypo: false,
   fixDarkMode: true,
   stripMedia: true,
+  kindlePages: true,
   fontMode: 'keep',
   alignMode: 'keep'
 };
@@ -53,6 +54,8 @@ const els = {
   typoCountPill: document.getElementById('typoCountPill'),
   fixDarkModeToggle: document.getElementById('fixDarkModeToggle'),
   stripMediaToggle: document.getElementById('stripMediaToggle'),
+  kindlePagesToggle: document.getElementById('kindlePagesToggle'),
+  kindlePagesPill: document.getElementById('kindlePagesPill'),
   mediaCountPill: document.getElementById('mediaCountPill'),
   fontSelect: document.getElementById('fontSelect'),
   alignSelect: document.getElementById('alignSelect'),
@@ -597,6 +600,7 @@ function syncControlsFromSettings() {
   els.fixTypoToggle.checked = s.fixTypo;
   els.fixDarkModeToggle.checked = s.fixDarkMode;
   els.stripMediaToggle.checked = s.stripMedia;
+  if (els.kindlePagesToggle) els.kindlePagesToggle.checked = s.kindlePages !== false;
   els.fontSelect.value = s.fontMode;
   els.alignSelect.value = s.alignMode;
   els.customFontRow.classList.toggle('hidden', s.fontMode !== 'custom');
@@ -623,6 +627,7 @@ bindSetting(els.fixDashesToggle, 'fixDashes', 'change');
 bindSetting(els.fixTypoToggle, 'fixTypo', 'change');
 bindSetting(els.fixDarkModeToggle, 'fixDarkMode', 'change');
 bindSetting(els.stripMediaToggle, 'stripMedia', 'change');
+  if (els.kindlePagesToggle) bindSetting(els.kindlePagesToggle, 'kindlePages', 'change');
 bindSetting(els.fontSelect, 'fontMode', 'change');
 bindSetting(els.alignSelect, 'alignMode', 'change');
 
@@ -699,6 +704,12 @@ function renderAll() {
   els.statParagraphs.textContent = book.totalParagraphs;
   els.statImages.textContent = book.images.length;
   els.statMedia.textContent = book.mediaFiles.length;
+  if (els.kindlePagesPill) {
+    const totalChars = book.chapters.filter(c => !c.markedDelete).reduce((sum, c) => sum + (c.charCount || 0), 0);
+    const estPages = Math.max(1, Math.round(totalChars / 1800));
+    els.kindlePagesPill.textContent = `~${estPages} стр.`;
+  }
+
 
   // Счётчики находок
   els.dashCountPill.textContent = book.dashHits > 0 ? `Найдено: ${book.dashHits}` : 'Не найдено';
@@ -937,6 +948,56 @@ els.keepAllImgsBtn.addEventListener('click', () => {
 });
 
 // Генерация CSS с учётом всех настроек пользователя
+
+const CHARS_PER_KINDLE_PAGE = 1800;
+
+function injectKindlePageAnchors(doc, isXml, relHrefFromOpf, stateObj) {
+  const ps = Array.from(doc.querySelectorAll('p'));
+  for (const p of ps) {
+    const len = (p.textContent || '').trim().length;
+    if (!len) continue;
+    stateObj.charAcc += len;
+    if (stateObj.page === 0 || stateObj.charAcc >= CHARS_PER_KINDLE_PAGE) {
+      stateObj.page++;
+      stateObj.charAcc = 0;
+      const anchorId = `kpage-${stateObj.page}`;
+      const span = isXml
+        ? doc.createElementNS('http://www.w3.org/1999/xhtml', 'span')
+        : doc.createElement('span');
+      span.setAttribute('id', anchorId);
+      span.setAttribute('epub:type', 'pagebreak');
+      span.setAttribute('role', 'doc-pagebreak');
+      span.setAttribute('title', String(stateObj.page));
+      p.insertBefore(span, p.firstChild);
+      stateObj.entries.push({ page: stateObj.page, href: `${relHrefFromOpf}#${anchorId}` });
+    }
+  }
+}
+
+function appendNcxPageList(ncxDoc, entries) {
+  if (!entries.length) return;
+  const ns = ncxDoc.documentElement.namespaceURI || 'http://www.daisy.org/z3986/2005/ncx/';
+  Array.from(ncxDoc.getElementsByTagNameNS('*', 'pageList')).forEach(el => el.remove());
+  const pageList = ncxDoc.createElementNS(ns, 'pageList');
+  entries.forEach((e, idx) => {
+    const pt = ncxDoc.createElementNS(ns, 'pageTarget');
+    pt.setAttribute('id', `pt-${e.page}`);
+    pt.setAttribute('type', 'normal');
+    pt.setAttribute('value', String(e.page));
+    pt.setAttribute('playOrder', String(10000 + idx));
+    const nl = ncxDoc.createElementNS(ns, 'navLabel');
+    const txt = ncxDoc.createElementNS(ns, 'text');
+    txt.textContent = String(e.page);
+    nl.appendChild(txt);
+    const content = ncxDoc.createElementNS(ns, 'content');
+    content.setAttribute('src', e.href);
+    pt.appendChild(nl);
+    pt.appendChild(content);
+    pageList.appendChild(pt);
+  });
+  ncxDoc.documentElement.appendChild(pageList);
+}
+
 function buildOverrideCss(s, customFontRelUrl) {
   const rules = [];
 
@@ -1249,6 +1310,7 @@ async function exportModifiedEpub(book, s) {
     return (m.includes('xhtml') || m.includes('html')) && item.getAttribute('id') !== 'custom-cover-page';
   });
 
+  const kindleState = { page: 0, charAcc: 0, entries: [] };
   for (const item of htmlItems) {
     const htmlPath = resolveZipPath(book.opfDir, item.getAttribute('href'));
     const entry = zip.file(htmlPath);
@@ -1307,6 +1369,13 @@ async function exportModifiedEpub(book, s) {
       }
       processParagraphTextNodes(p, doc, s);
     });
+    if (s.kindlePages !== false) {
+      injectKindlePageAnchors(doc, true, fileName, kindleState);
+    }
+
+    if (s.kindlePages !== false) {
+      injectKindlePageAnchors(doc, isXml, item.getAttribute('href'), kindleState);
+    }
 
     const depth = htmlDir ? htmlDir.split('/').filter(Boolean).length : 0;
     const opfDepth = book.opfDir ? book.opfDir.split('/').filter(Boolean).length : 0;
@@ -1328,6 +1397,14 @@ async function exportModifiedEpub(book, s) {
     zip.file(htmlPath, isXml ? serializer.serializeToString(doc) : doc.documentElement.outerHTML);
   }
 
+  if (s.kindlePages !== false && kindleState.entries.length > 0 && ncxItem) {
+    const ncxPath = resolveZipPath(book.opfDir, ncxItem.getAttribute('href'));
+    if (zip.file(ncxPath)) {
+      const ncxDoc = parser.parseFromString(await zip.file(ncxPath).async('string'), 'application/xml');
+      appendNcxPageList(ncxDoc, kindleState.entries);
+      zip.file(ncxPath, serializer.serializeToString(ncxDoc));
+    }
+  }
   zip.file(book.opfPath, serializer.serializeToString(opfDoc));
 
   const outZip = new JSZip();
@@ -1397,6 +1474,7 @@ ${buildOverrideCss(s, customFontRel)}
   const serializer = new XMLSerializer();
   const activeChapters = book.chapters.filter(c => !c.markedDelete);
 
+  const kindleState = { page: 0, charAcc: 0, entries: [] };
   activeChapters.forEach((ch, idx) => {
     const fileId = `ch-${idx + 1}`;
     const fileName = `${fileId}.xhtml`;
@@ -1443,6 +1521,7 @@ ${buildOverrideCss(s, customFontRel)}
   <head><meta name="dtb:uid" content="${bookUuid}"/></head>
   <docTitle><text>${escapeXml(newTitle)}</text></docTitle>
   <navMap>${navPoints.join('')}</navMap>
+  ${s.kindlePages !== false && kindleState.entries.length ? `<pageList>${kindleState.entries.map((e, i) => `<pageTarget id="pt-${e.page}" type="normal" value="${e.page}" playOrder="${10000 + i}"><navLabel><text>${e.page}</text></navLabel><content src="${e.href}"/></pageTarget>`).join('')}</pageList>` : ''}
 </ncx>`);
 
   outZip.file('OEBPS/content.opf', `<?xml version="1.0" encoding="UTF-8"?>
