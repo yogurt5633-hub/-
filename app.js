@@ -873,6 +873,12 @@ async function smartFindFanTranslationCandidates(book) {
     if (cleanAuthor && hasCyrillic(cleanAuthor)) enAuthor = await translateText(cleanAuthor, 'en');
   } catch {}
 
+  if (cleanAuthor && hasCyrillic(cleanAuthor)) {
+    for (const trA of transliterateRuName(cleanAuthor)) {
+      if (enTitle) addUnique(await fetchGoogleBooksCandidates(`${enTitle} ${trA}`), `Перевод + транслит автора: «${enTitle}» · ${trA}`);
+      addUnique(await fetchGoogleBooksCandidates(`inauthor:${trA}`), `Книги автора (${trA})`);
+    }
+  }
   if (enTitle && enAuthor) {
     addUnique(await fetchGoogleBooksCandidates(`${enTitle} ${enAuthor}`), `Перевод названия: «${enTitle}» · ${enAuthor}`);
   }
@@ -1417,6 +1423,34 @@ async function fetchImageBlobSafe(url) {
   throw new Error('Не удалось загрузить картинку');
 }
 
+
+function transliterateRuName(str) {
+  const map = {
+    'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'e','ж':'zh','з':'z',
+    'и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r',
+    'с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch',
+    'ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya'
+  };
+  let out = '';
+  for (const ch of (str || '')) {
+    const low = ch.toLowerCase();
+    if (map[low] !== undefined) {
+      const tr = map[low];
+      out += (ch === low) ? tr : (tr.charAt(0).toUpperCase() + tr.slice(1));
+    } else {
+      out += ch;
+    }
+  }
+  // Популярные фонетические замены английских фамилий
+  const variants = [out];
+  if (/krik/i.test(out)) variants.push(out.replace(/krik/gi, 'Creek'), out.replace(/krik/gi, 'Krick'));
+  if (/bl[eay]k/i.test(out)) variants.push(out.replace(/bl[eay]k/gi, 'Black'));
+  if (/braun/i.test(out)) variants.push(out.replace(/braun/gi, 'Brown'));
+  if (/smit/i.test(out)) variants.push(out.replace(/smit/gi, 'Smith'));
+  if (/уайт|uayt/i.test(out)) variants.push(out.replace(/uayt/gi, 'White'));
+  return variants;
+}
+
 async function searchAllEditionCovers(rawQuery, editionModifier = '') {
   const results = [];
   const seenUrls = new Set();
@@ -1429,75 +1463,72 @@ async function searchAllEditionCovers(rawQuery, editionModifier = '') {
     results.push({ url: cleanUrl, label });
   }
 
-  // Если запрос на русском — дополнительно переводим его на английский, чтобы найти оригинальные обложки и лимитки!
-  let enQuery = rawQuery;
-  if (hasCyrillic(rawQuery)) {
-    try {
-      enQuery = await translateText(rawQuery, 'en');
-    } catch {}
-  }
+  const book = activeBook();
+  const bookTitle = (book && book.title ? book.title : rawQuery).trim();
+  const bookAuthor = (book && book.author ? book.author : '').trim();
 
+  // Собираем умный список поисковых запросов (от точных к широким, чтобы ВСЕГДА находить обложки!)
   const searchTerms = [];
-  if (enQuery && enQuery.toLowerCase() !== rawQuery.toLowerCase()) {
-    searchTerms.push(editionModifier ? `${enQuery} ${editionModifier}` : enQuery);
+  function pushTerm(t) {
+    const clean = (t || '').replace(/\s+/g, ' ').trim();
+    if (clean.length >= 2 && !searchTerms.includes(clean)) searchTerms.push(clean);
   }
-  searchTerms.push(editionModifier ? `${rawQuery} ${editionModifier}` : rawQuery);
 
-  // 1. Apple Books (iTunes Search API) — даёт обложки высочайшего качества 1000x1500 HD + аудио/бонусные издания
-  for (const term of searchTerms) {
-    try {
-      const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=ebook&limit=12`;
-      const res = await fetch(itunesUrl);
-      if (res.ok) {
-        const data = await res.json();
-        for (const item of (data.results || [])) {
-          if (item.artworkUrl100) {
-            const hdUrl = item.artworkUrl100.replace(/100x100bb/i, '1000x1000bb');
-            const year = item.releaseDate ? item.releaseDate.slice(0, 4) : '';
-            addCover(hdUrl, `HD · ${year || item.trackName || 'Apple Books'}`);
+  // 1. Оригинальный запрос пользователя
+  pushTerm(editionModifier ? `${rawQuery} ${editionModifier}` : rawQuery);
+
+  // 2. Если есть русское название и автор с говорящей фамилией (например "А. Г. Крик"):
+  // Переводим ТОЛЬКО название на английский ("Lunar Eclipse"), а автора транслитерируем ("A. G. Creek" / "A. G. Krik")!
+  let enTitleOnly = '';
+  let enFullQuery = '';
+  try {
+    if (hasCyrillic(bookTitle)) {
+      enTitleOnly = await translateText(bookTitle, 'en');
+    } else {
+      enTitleOnly = bookTitle;
+    }
+    if (hasCyrillic(rawQuery)) {
+      enFullQuery = await translateText(rawQuery, 'en');
+    }
+  } catch {}
+
+  if (bookAuthor && hasCyrillic(bookAuthor)) {
+    const authorTranslitList = transliterateRuName(bookAuthor);
+    for (const trAuth of authorTranslitList) {
+      if (enTitleOnly) pushTerm(editionModifier ? `${enTitleOnly} ${trAuth} ${editionModifier}` : `${enTitleOnly} ${trAuth}`);
+    }
+  }
+
+  if (enFullQuery) pushTerm(editionModifier ? `${enFullQuery} ${editionModifier}` : enFullQuery);
+
+  // 3. Обязательно ищем ОТДЕЛЬНО по названию книги (на англ. и на рус.), если фамилия автора редкая или с инициалами!
+  if (enTitleOnly) pushTerm(editionModifier ? `${enTitleOnly} ${editionModifier}` : enTitleOnly);
+  if (bookTitle) pushTerm(bookTitle);
+
+  // 1. Apple Books (ищем одновременно в US Store для оригиналов и в RU Store для русских книг!)
+  for (const term of searchTerms.slice(0, 6)) {
+    const countries = hasCyrillic(term) ? ['ru', 'us'] : ['us', 'gb'];
+    for (const country of countries) {
+      try {
+        const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&country=${country}&media=ebook&limit=10`;
+        const res = await fetch(itunesUrl);
+        if (res.ok) {
+          const data = await res.json();
+          for (const item of (data.results || [])) {
+            if (item.artworkUrl100) {
+              const hdUrl = item.artworkUrl100.replace(/100x100bb/i, '1000x1000bb');
+              const year = item.releaseDate ? item.releaseDate.slice(0, 4) : '';
+              const authorShort = item.artistName ? ` · ${item.artistName}` : '';
+              addCover(hdUrl, `${year || 'HD'}${authorShort}`);
+            }
           }
         }
-      }
-    } catch {}
+      } catch {}
+    }
   }
 
-  // 2. OpenLibrary — вытаскивает ВСЕ переиздания, коллекционки и обложки разных лет одной книги (cover_i + editions)
-  for (const term of searchTerms) {
-    try {
-      const olUrl = `https://openlibrary.org/search.json?q=${encodeURIComponent(term)}&limit=8`;
-      const res = await fetch(olUrl);
-      if (res.ok) {
-        const data = await res.json();
-        for (const doc of (data.docs || [])) {
-          if (doc.cover_i) {
-            addCover(`https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`, `Издание ${doc.first_publish_year || ''}`.trim());
-          }
-          // Подгружаем список всех переизданий (editions) этого произведения!
-          if (doc.key && results.length < 28) {
-            try {
-              const edRes = await fetch(`https://openlibrary.org${doc.key}/editions.json?limit=25`);
-              if (edRes.ok) {
-                const edData = await edRes.json();
-                for (const ed of (edData.entries || [])) {
-                  if (ed.covers && ed.covers.length > 0) {
-                    const fmt = ed.physical_format || ed.publish_date || 'Переиздание';
-                    for (const cid of ed.covers) {
-                      if (cid > 0) {
-                        addCover(`https://covers.openlibrary.org/b/id/${cid}-L.jpg`, String(fmt));
-                      }
-                    }
-                  }
-                }
-              }
-            } catch {}
-          }
-        }
-      }
-    } catch {}
-  }
-
-  // 3. Google Books — международные обложки и бокс-сеты
-  for (const term of searchTerms) {
+  // 2. Google Books (отлично знает и русские книги, и мировые издания)
+  for (const term of searchTerms.slice(0, 6)) {
     try {
       const gbUrl = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=12`;
       const res = await fetch(gbUrl);
@@ -1510,14 +1541,46 @@ async function searchAllEditionCovers(rawQuery, editionModifier = '') {
             let img = links.extraLarge || links.large || links.medium || links.thumbnail || '';
             img = img.replace('&edge=curl', '').replace('zoom=1', 'zoom=2');
             const yr = (info.publishedDate || '').slice(0, 4);
-            addCover(img, yr ? `Издание ${yr}` : (info.title || 'Google Books'));
+            addCover(img, `${info.title || 'Издание'}${yr ? ' (' + yr + ')' : ''}`);
           }
         }
       }
     } catch {}
   }
 
-  return { results, enQuery };
+  // 3. OpenLibrary — все мировые переиздания и лимитки
+  for (const term of searchTerms.slice(0, 4)) {
+    try {
+      const olUrl = `https://openlibrary.org/search.json?q=${encodeURIComponent(term)}&limit=8`;
+      const res = await fetch(olUrl);
+      if (res.ok) {
+        const data = await res.json();
+        for (const doc of (data.docs || [])) {
+          if (doc.cover_i) {
+            addCover(`https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`, `${doc.title || 'Издание'} ${doc.first_publish_year || ''}`.trim());
+          }
+          if (doc.key && results.length < 28) {
+            try {
+              const edRes = await fetch(`https://openlibrary.org${doc.key}/editions.json?limit=18`);
+              if (edRes.ok) {
+                const edData = await edRes.json();
+                for (const ed of (edData.entries || [])) {
+                  if (ed.covers && ed.covers.length > 0) {
+                    const fmt = ed.physical_format || ed.publish_date || 'Переиздание';
+                    for (const cid of ed.covers) {
+                      if (cid > 0) addCover(`https://covers.openlibrary.org/b/id/${cid}-L.jpg`, String(fmt));
+                    }
+                  }
+                }
+              }
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return { results, enQuery: enTitleOnly || enFullQuery };
 }
 
 async function runCoverGallerySearch() {

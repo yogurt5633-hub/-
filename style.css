@@ -1189,3 +1189,89 @@ body {
   color: var(--text-secondary);
   margin-right: 4px;
 }
+
+/* Жёсткая защита мобильной вёрстки от горизонтального разъезжания */
+html, body {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+.container,
+.workspace,
+.panel,
+.queue-bar,
+.book-meta-grid,
+.meta-fields,
+.field,
+.cover-gallery-panel,
+.detective-box,
+.candidates-box {
+  min-width: 0;
+  max-width: 100%;
+}
+
+@media (max-width: 600px) {
+  .container {
+    padding: 12px 10px;
+  }
+
+  .panel {
+    padding: 14px 12px;
+  }
+
+  .book-meta-grid {
+    grid-template-columns: 1fr !important;
+    gap: 14px;
+  }
+
+  .cover-column {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 14px;
+  }
+
+  .cover-box {
+    width: 96px;
+  }
+
+  .cover-actions {
+    margin-top: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .cover-actions button {
+    width: 100%;
+  }
+
+  .stats-row {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .cg-Chips {
+    display: flex;
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+
+  .action-bar {
+    padding: 10px 12px;
+  }
+
+  .action-info {
+    display: none;
+  }
+
+  .action-buttons {
+    width: 100%;
+    display: flex;
+  }
+
+  .action-buttons button {
+    flex: 1;
+  }
+}
