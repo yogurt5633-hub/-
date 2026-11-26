@@ -67,7 +67,8 @@
             </div>
             <input type="file" id="coverInput" accept="image/jpeg,image/png,image/webp" hidden>
             <div class="cover-actions">
-              <button id="changeCoverBtn" class="btn-secondary btn-sm" type="button">Заменить</button>
+              <button id="searchCoversBtn" class="btn-secondary btn-sm" type="button">Найти обложки</button>
+              <button id="changeCoverBtn" class="btn-ghost btn-sm" type="button">С телефона</button>
               <button id="removeCoverBtn" class="btn-ghost btn-sm hidden" type="button">Убрать</button>
             </div>
           </div>
@@ -106,6 +107,24 @@
                 <input type="checkbox" id="insertDescPageToggle" class="checkbox-sm" checked>
                 <span>Добавить страницу с аннотацией в начало книги</span>
               </label>
+            </div>
+            <div id="coverGalleryPanel" class="cover-gallery-panel hidden">
+              <div class="cg-header">
+                <span class="cg-title">Обложки и переиздания</span>
+                <button id="closeCoverGalleryBtn" class="btn-link" type="button">Скрыть</button>
+              </div>
+              <div class="cg-search-row">
+                <input type="text" id="coverQueryInput" class="input input-sm" placeholder="Название / автор на англ. или рус...">
+                <button id="runCoverSearchBtn" class="btn-secondary btn-sm" type="button">Искать</button>
+              </div>
+              <div class="cg-Chips">
+                <button type="button" class="cg-chip active" data-edition="">Все издания</button>
+                <button type="button" class="cg-chip" data-edition="special collector deluxe edition">Лимитки / Deluxe</button>
+                <button type="button" class="cg-chip" data-edition="uk edition hardcover">Переиздания / UK</button>
+                <button type="button" class="cg-chip" data-edition="bonus extended">Бонусные</button>
+              </div>
+              <div id="coverGalleryStatus" class="cg-status">Нажмите «Искать», чтобы загрузить обложки...</div>
+              <div id="coverGalleryGrid" class="cg-grid"></div>
             </div>
             <div class="stats-row">
               <div class="stat-item">

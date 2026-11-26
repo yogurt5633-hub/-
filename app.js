@@ -35,7 +35,14 @@ const els = {
   coverImg: document.getElementById('coverImg'),
   coverPlaceholder: document.querySelector('.cover-placeholder'),
   coverInput: document.getElementById('coverInput'),
+  searchCoversBtn: document.getElementById('searchCoversBtn'),
   changeCoverBtn: document.getElementById('changeCoverBtn'),
+  coverGalleryPanel: document.getElementById('coverGalleryPanel'),
+  closeCoverGalleryBtn: document.getElementById('closeCoverGalleryBtn'),
+  coverQueryInput: document.getElementById('coverQueryInput'),
+  runCoverSearchBtn: document.getElementById('runCoverSearchBtn'),
+  coverGalleryStatus: document.getElementById('coverGalleryStatus'),
+  coverGalleryGrid: document.getElementById('coverGalleryGrid'),
   removeCoverBtn: document.getElementById('removeCoverBtn'),
   titleInput: document.getElementById('titleInput'),
   authorInput: document.getElementById('authorInput'),
@@ -1006,6 +1013,7 @@ function renderAll() {
   if (els.descInput) els.descInput.value = book.description || '';
   if (els.detectedOrigRow) els.detectedOrigRow.classList.add('hidden');
   if (els.searchCandidatesBox) els.searchCandidatesBox.classList.add('hidden');
+  if (els.coverGalleryPanel) els.coverGalleryPanel.classList.add('hidden');
 
   els.statChapters.textContent = book.chapters.length;
   els.statParagraphs.textContent = book.totalParagraphs;
@@ -1079,6 +1087,237 @@ function renderQueue() {
     els.bookTabs.appendChild(tab);
   });
 }
+
+
+let activeEditionFilter = '';
+
+async function fetchImageBlobSafe(url) {
+  // Пробуем скачать напрямую, а если сервер обложек блокирует CORS — через безопасный прокси изображений
+  const attempts = [
+    url,
+    `https://wsrv.nl/?url=${encodeURIComponent(url)}&output=jpg`
+  ];
+  for (const u of attempts) {
+    try {
+      const res = await fetch(u);
+      if (res.ok) {
+        const blob = await res.blob();
+        if (blob.size > 1000) return blob;
+      }
+    } catch {}
+  }
+  throw new Error('Не удалось загрузить картинку');
+}
+
+async function searchAllEditionCovers(rawQuery, editionModifier = '') {
+  const results = [];
+  const seenUrls = new Set();
+
+  function addCover(url, label) {
+    if (!url) return;
+    const cleanUrl = url.replace(/^http:\/\//i, 'https://');
+    if (seenUrls.has(cleanUrl)) return;
+    seenUrls.add(cleanUrl);
+    results.push({ url: cleanUrl, label });
+  }
+
+  // Если запрос на русском — дополнительно переводим его на английский, чтобы найти оригинальные обложки и лимитки!
+  let enQuery = rawQuery;
+  if (hasCyrillic(rawQuery)) {
+    try {
+      enQuery = await translateText(rawQuery, 'en');
+    } catch {}
+  }
+
+  const searchTerms = [];
+  if (enQuery && enQuery.toLowerCase() !== rawQuery.toLowerCase()) {
+    searchTerms.push(editionModifier ? `${enQuery} ${editionModifier}` : enQuery);
+  }
+  searchTerms.push(editionModifier ? `${rawQuery} ${editionModifier}` : rawQuery);
+
+  // 1. Apple Books (iTunes Search API) — даёт обложки высочайшего качества 1000x1500 HD + аудио/бонусные издания
+  for (const term of searchTerms) {
+    try {
+      const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=ebook&limit=12`;
+      const res = await fetch(itunesUrl);
+      if (res.ok) {
+        const data = await res.json();
+        for (const item of (data.results || [])) {
+          if (item.artworkUrl100) {
+            const hdUrl = item.artworkUrl100.replace(/100x100bb/i, '1000x1000bb');
+            const year = item.releaseDate ? item.releaseDate.slice(0, 4) : '';
+            addCover(hdUrl, `HD · ${year || item.trackName || 'Apple Books'}`);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 2. OpenLibrary — вытаскивает ВСЕ переиздания, коллекционки и обложки разных лет одной книги (cover_i + editions)
+  for (const term of searchTerms) {
+    try {
+      const olUrl = `https://openlibrary.org/search.json?q=${encodeURIComponent(term)}&limit=8`;
+      const res = await fetch(olUrl);
+      if (res.ok) {
+        const data = await res.json();
+        for (const doc of (data.docs || [])) {
+          if (doc.cover_i) {
+            addCover(`https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`, `Издание ${doc.first_publish_year || ''}`.trim());
+          }
+          // Подгружаем список всех переизданий (editions) этого произведения!
+          if (doc.key && results.length < 28) {
+            try {
+              const edRes = await fetch(`https://openlibrary.org${doc.key}/editions.json?limit=25`);
+              if (edRes.ok) {
+                const edData = await edRes.json();
+                for (const ed of (edData.entries || [])) {
+                  if (ed.covers && ed.covers.length > 0) {
+                    const fmt = ed.physical_format || ed.publish_date || 'Переиздание';
+                    for (const cid of ed.covers) {
+                      if (cid > 0) {
+                        addCover(`https://covers.openlibrary.org/b/id/${cid}-L.jpg`, String(fmt));
+                      }
+                    }
+                  }
+                }
+              }
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 3. Google Books — международные обложки и бокс-сеты
+  for (const term of searchTerms) {
+    try {
+      const gbUrl = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=12`;
+      const res = await fetch(gbUrl);
+      if (res.ok) {
+        const data = await res.json();
+        for (const item of (data.items || [])) {
+          const info = item.volumeInfo || {};
+          const links = info.imageLinks;
+          if (links) {
+            let img = links.extraLarge || links.large || links.medium || links.thumbnail || '';
+            img = img.replace('&edge=curl', '').replace('zoom=1', 'zoom=2');
+            const yr = (info.publishedDate || '').slice(0, 4);
+            addCover(img, yr ? `Издание ${yr}` : (info.title || 'Google Books'));
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return { results, enQuery };
+}
+
+async function runCoverGallerySearch() {
+  const book = activeBook();
+  if (!book) return;
+  const query = (els.coverQueryInput.value || `${book.title} ${book.author}`).trim();
+  if (!query) {
+    alert('Введите название книги или автора для поиска обложек.');
+    return;
+  }
+
+  els.runCoverSearchBtn.disabled = true;
+  els.coverGalleryStatus.textContent = 'Ищем оригиналы, переиздания и лимитки (переводим запрос на англ.)...';
+  els.coverGalleryGrid.innerHTML = '';
+
+  try {
+    const { results, enQuery } = await searchAllEditionCovers(query, activeEditionFilter);
+    if (!results.length) {
+      els.coverGalleryStatus.textContent = 'Обложки не найдены. Попробуйте написать только оригинальное название или автора.';
+      return;
+    }
+
+    const note = (enQuery && enQuery.toLowerCase() !== query.toLowerCase()) ? ` (поиск: ${enQuery})` : '';
+    els.coverGalleryStatus.textContent = `Найдено обложек разных изданий: ${results.length}${note}. Нажмите на любую, чтобы установить:`;
+
+    results.forEach(item => {
+      const card = document.createElement('div');
+      card.className = 'cg-card';
+      card.innerHTML = `
+        <div class="cg-img-wrap">
+          <img src="${item.url}" loading="lazy" alt="Cover">
+        </div>
+        <div class="cg-caption" title="${escapeXml(item.label)}">${escapeXml(item.label)}</div>
+      `;
+      card.addEventListener('click', async () => {
+        const cap = card.querySelector('.cg-caption');
+        const oldText = cap.textContent;
+        cap.textContent = 'Качаем...';
+        try {
+          const blob = await fetchImageBlobSafe(item.url);
+          if (book.cover && book.cover.url) URL.revokeObjectURL(book.cover.url);
+          book.cover = {
+            blob,
+            mime: blob.type || 'image/jpeg',
+            url: URL.createObjectURL(blob),
+            originalPath: book.cover ? book.cover.originalPath : null,
+            id: book.cover ? book.cover.id : null,
+            changed: true,
+            removed: false
+          };
+          renderCover();
+          cap.textContent = 'Установлена!';
+          els.statusText.textContent = 'Новая обложка установлена';
+        } catch (err) {
+          alert('Не удалось скачать эту обложку: ' + err.message);
+          cap.textContent = oldText;
+        }
+      });
+      els.coverGalleryGrid.appendChild(card);
+    });
+  } finally {
+    els.runCoverSearchBtn.disabled = false;
+  }
+}
+
+if (els.searchCoversBtn) {
+  els.searchCoversBtn.addEventListener('click', () => {
+    const book = activeBook();
+    if (!book) return;
+    const isHidden = els.coverGalleryPanel.classList.contains('hidden');
+    if (isHidden) {
+      els.coverGalleryPanel.classList.remove('hidden');
+      const clueTitle = (book.clues && book.clues.origTitle) ? book.clues.origTitle : book.title;
+      els.coverQueryInput.value = `${clueTitle || ''} ${book.author || ''}`.trim();
+      runCoverGallerySearch();
+    } else {
+      els.coverGalleryPanel.classList.add('hidden');
+    }
+  });
+}
+
+if (els.closeCoverGalleryBtn) {
+  els.closeCoverGalleryBtn.addEventListener('click', () => {
+    els.coverGalleryPanel.classList.add('hidden');
+  });
+}
+
+if (els.runCoverSearchBtn) {
+  els.runCoverSearchBtn.addEventListener('click', runCoverGallerySearch);
+}
+
+if (els.coverQueryInput) {
+  els.coverQueryInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      runCoverGallerySearch();
+    }
+  });
+}
+
+document.querySelectorAll('.cg-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('.cg-chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    activeEditionFilter = chip.getAttribute('data-edition') || '';
+    runCoverGallerySearch();
+  });
+});
 
 function renderCover() {
   const book = activeBook();
