@@ -104,6 +104,8 @@ const els = {
   emptyImagesState: document.getElementById('emptyImagesState'),
   imagesGrid: document.getElementById('imagesGrid'),
   statusText: document.getElementById('statusText'),
+  toastBar: document.getElementById('toastBar'),
+  bookModifiedBadge: document.getElementById('bookModifiedBadge'),
   exportBtn: document.getElementById('exportBtn'),
   exportAllBtn: document.getElementById('exportAllBtn')
 };
@@ -121,6 +123,66 @@ function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(appState.settings));
   } catch {}
+}
+
+
+let toastTimer = null;
+function showToast(message) {
+  if (!els.toastBar) return;
+  els.toastBar.textContent = message;
+  els.toastBar.classList.add('visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    els.toastBar.classList.remove('visible');
+  }, 2200);
+}
+
+function getTextParagraphBlocks(doc) {
+  const blocks = [];
+  const nestedBlockSel = 'p, div, h1, h2, h3, h4, h5, h6, ul, ol, li, table, blockquote, section, article, aside, header, footer';
+  doc.querySelectorAll('p, div').forEach(el => {
+    if (el.tagName.toLowerCase() === 'p') {
+      blocks.push(el);
+    } else if (!el.querySelector(nestedBlockSel)) {
+      blocks.push(el);
+    }
+  });
+  return blocks;
+}
+
+function updateChangesSummary() {
+  const book = activeBook();
+  if (!book) return;
+
+  const delImgs = book.images.filter(i => i.markedDelete).length;
+  const delChs = book.chapters.filter(c => c.markedDelete).length;
+  const parts = [];
+  if (book.metaEdited) parts.push('текст/данные');
+  if (book.cover && (book.cover.changed || book.cover.removed)) parts.push('обложка');
+  if (delChs > 0) parts.push(`-${delChs} гл.`);
+  if (delImgs > 0) parts.push(`-${delImgs} карт.`);
+
+  const hasChanges = parts.length > 0 || book.modified;
+  book.modified = hasChanges;
+
+  if (els.bookModifiedBadge) {
+    els.bookModifiedBadge.classList.toggle('hidden', !hasChanges);
+    if (hasChanges) els.bookModifiedBadge.textContent = 'Есть правки';
+  }
+
+  if (parts.length > 0) {
+    els.statusText.textContent = `Правки: ${parts.join(', ')} · Готово к сборке`;
+  } else {
+    els.statusText.textContent = 'Вёрстка настроена · Готово к сборке';
+  }
+}
+
+function markBookModified(book, toastMsg) {
+  if (!book) return;
+  book.modified = true;
+  updateChangesSummary();
+  renderQueue();
+  if (toastMsg) showToast(toastMsg);
 }
 
 function activeBook() {
@@ -437,7 +499,7 @@ async function parseEpubFile(file, originalName) {
       markedDelete: false
     });
 
-    const ps = Array.from(doc.querySelectorAll('p'));
+    const ps = getTextParagraphBlocks(doc);
     for (const p of ps) {
       const rawText = p.textContent || '';
       if (rawText.trim().length > 0) {
@@ -682,6 +744,7 @@ function bindSetting(el, key, eventName, transform = v => v) {
     const val = el.type === 'checkbox' ? el.checked : transform(el.value);
     appState.settings[key] = val;
     saveSettings();
+    if (eventName === 'change') showToast('Настройка применена');
     if (key === 'fontMode') {
       els.customFontRow.classList.toggle('hidden', val !== 'custom');
     }
@@ -737,27 +800,44 @@ els.titleInput.addEventListener('input', () => {
   const b = activeBook();
   if (!b) return;
   b.title = els.titleInput.value;
-  renderQueue();
+  b.metaEdited = true;
+  markBookModified(b);
 });
+els.titleInput.addEventListener('change', () => showToast('Название сохранено'));
 els.authorInput.addEventListener('input', () => {
   const b = activeBook();
-  if (b) b.author = els.authorInput.value;
+  if (!b) return;
+  b.author = els.authorInput.value;
+  b.metaEdited = true;
+  markBookModified(b);
 });
+els.authorInput.addEventListener('change', () => showToast('Автор сохранён'));
 els.seriesInput.addEventListener('input', () => {
   const b = activeBook();
-  if (b) b.series = els.seriesInput.value;
+  if (!b) return;
+  b.series = els.seriesInput.value;
+  b.metaEdited = true;
+  markBookModified(b);
 });
+els.seriesInput.addEventListener('change', () => showToast('Серия сохранена'));
 els.seriesIndexInput.addEventListener('input', () => {
   const b = activeBook();
-  if (b) b.seriesIndex = els.seriesIndexInput.value;
+  if (!b) return;
+  b.seriesIndex = els.seriesIndexInput.value;
+  b.metaEdited = true;
+  markBookModified(b);
 });
 
 
 if (els.descInput) {
   els.descInput.addEventListener('input', () => {
     const b = activeBook();
-    if (b) b.description = els.descInput.value;
+    if (!b) return;
+    b.description = els.descInput.value;
+    b.metaEdited = true;
+    markBookModified(b);
   });
+  els.descInput.addEventListener('change', () => showToast('Аннотация сохранена'));
 }
 
 
@@ -1365,7 +1445,7 @@ function renderAll() {
   renderPreview();
   renderChaptersList();
   renderImagesGrid();
-  els.statusText.textContent = 'Готово к сборке';
+  updateChangesSummary();
 }
 
 function renderQueue() {
@@ -1381,7 +1461,7 @@ function renderQueue() {
     const tab = document.createElement('div');
     tab.className = 'book-tab' + (idx === appState.activeIndex ? ' active' : '');
     tab.innerHTML = `
-      <span class="book-tab-title">${escapeXml(b.title || b.originalName)}</span>
+      ${b.modified ? '<span class="tab-dot" title="Есть изменения"></span>' : ''}<span class="book-tab-title">${escapeXml(b.title || b.originalName)}</span>
       <button class="book-tab-remove" type="button" title="Убрать из списка">×</button>
     `;
     tab.addEventListener('click', (e) => {
@@ -1633,7 +1713,7 @@ async function runCoverGallerySearch() {
           };
           renderCover();
           cap.textContent = 'Установлена!';
-          els.statusText.textContent = 'Новая обложка установлена';
+          markBookModified(book, 'Обложка из сети установлена');
         } catch (err) {
           alert('Не удалось скачать эту обложку: ' + err.message);
           cap.textContent = oldText;
@@ -1722,12 +1802,14 @@ els.coverInput.addEventListener('change', (e) => {
     removed: false
   };
   renderCover();
+  markBookModified(book, 'Обложка заменена');
 });
 
 els.removeCoverBtn.addEventListener('click', () => {
   const book = activeBook();
   if (book && book.cover) book.cover.removed = true;
   renderCover();
+  markBookModified(book, 'Обложка убрана');
 });
 
 function renderPreview() {
@@ -1794,6 +1876,7 @@ function renderChaptersList() {
     row.addEventListener('click', () => {
       book.chapters[idx].markedDelete = !book.chapters[idx].markedDelete;
       renderChaptersList();
+      markBookModified(book, book.chapters[idx].markedDelete ? 'Глава отмечена на удаление' : 'Глава оставлена');
     });
     els.chaptersList.appendChild(row);
   });
@@ -1842,6 +1925,7 @@ function renderImagesGrid() {
     card.addEventListener('click', () => {
       book.images[index].markedDelete = !book.images[index].markedDelete;
       renderImagesGrid();
+      markBookModified(book, book.images[index].markedDelete ? 'Картинка отмечена на удаление' : 'Картинка оставлена');
     });
     els.imagesGrid.appendChild(card);
   });
@@ -2063,7 +2147,7 @@ function formatKindleBookTitle(rawTitle, series, seriesIndex, enabled) {
 const CHARS_PER_KINDLE_PAGE = 1800;
 
 function injectKindlePageAnchors(doc, isXml, relHrefFromOpf, stateObj) {
-  const ps = Array.from(doc.querySelectorAll('p'));
+  const ps = getTextParagraphBlocks(doc);
   for (const p of ps) {
     const len = (p.textContent || '').trim().length;
     if (!len) continue;
@@ -2133,7 +2217,7 @@ function buildOverrideCss(s, customFontRelUrl) {
       ? 'text-align: left !important;'
       : '';
 
-  rules.push(`p { text-indent: ${s.removeIndent ? '0 !important' : '1.5em'}; margin-top: 0 !important; margin-bottom: ${s.spacing}em !important; ${alignRule} }`);
+  rules.push(`p, .pereplet-p { text-indent: ${s.removeIndent ? '0 !important' : '1.5em'}; margin-top: 0 !important; margin-bottom: ${s.spacing}em !important; ${alignRule} }`);
   rules.push(`div.paragraph, .p, .text { text-indent: ${s.removeIndent ? '0 !important' : '1.5em'}; }`);
 
   return rules.join('\n');
@@ -2239,6 +2323,7 @@ async function buildBookBlob(book, s) {
 
 // Сборка модифицированного EPUB (не мутирует исходный book.zip, работает с копией)
 async function exportModifiedEpub(book, s) {
+  let idx = 0;
   const parser = new DOMParser();
   const serializer = new XMLSerializer();
 
@@ -2472,6 +2557,7 @@ async function exportModifiedEpub(book, s) {
 
   const kindleState = { page: 0, charAcc: 0, entries: [] };
   for (const item of htmlItems) {
+    idx++;
     const htmlPath = resolveZipPath(book.opfDir, item.getAttribute('href'));
     const entry = zip.file(htmlPath);
     if (!entry) continue;
@@ -2514,11 +2600,12 @@ async function exportModifiedEpub(book, s) {
     }
 
     // Правка абзацев
-    doc.querySelectorAll('p').forEach(p => {
+    getTextParagraphBlocks(doc).forEach(p => {
       if (s.cleanEmpty && isParagraphEmpty(p)) {
         p.remove();
         return;
       }
+      if (p.tagName && p.tagName.toLowerCase() === 'div') p.classList.add('pereplet-p');
       if (p.hasAttribute('style')) {
         const st = p.getAttribute('style')
           .replace(/text-indent\s*:[^;]+;?/gi, '')
@@ -2613,6 +2700,7 @@ async function exportModifiedEpub(book, s) {
 
 // Сборка нового чистого EPUB из FB2 / TXT
 async function exportFreshEpub(book, s) {
+  let idx = 0;
   const outZip = new JSZip();
   outZip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
   outZip.file('META-INF/container.xml', `<?xml version="1.0" encoding="UTF-8"?>

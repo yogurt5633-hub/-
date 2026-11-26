@@ -11,6 +11,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 <body>
+  <div id="toastBar" class="toast-bar" aria-live="polite"></div>
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand">
@@ -57,7 +58,7 @@
       <section class="panel">
         <div class="panel-header">
           <h2 class="panel-title">Издание</h2>
-          <span id="formatBadge" class="badge">EPUB</span>
+          <div class="header-badges"><span id="bookModifiedBadge" class="pill has-hits hidden">Изменено</span><span id="formatBadge" class="badge">EPUB</span></div>
         </div>
         <div class="book-meta-grid">
           <div class="cover-column">
