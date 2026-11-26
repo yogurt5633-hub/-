@@ -42,6 +42,8 @@ const els = {
   seriesInput: document.getElementById('seriesInput'),
   seriesIndexInput: document.getElementById('seriesIndexInput'),
   descInput: document.getElementById('descInput'),
+  detectedOrigRow: document.getElementById('detectedOrigRow'),
+  searchCandidatesBox: document.getElementById('searchCandidatesBox'),
   findDescBtn: document.getElementById('findDescBtn'),
   translateDescBtn: document.getElementById('translateDescBtn'),
   insertDescPageToggle: document.getElementById('insertDescPageToggle'),
@@ -275,7 +277,8 @@ async function parseEpubFile(file, originalName) {
   const opfPath = containerDoc.querySelector('rootfile').getAttribute('full-path');
   const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/')) : '';
 
-  const opfDoc = parser.parseFromString(await zip.file(opfPath).async('string'), 'application/xml');
+  const opfXmlRaw = await zip.file(opfPath).async('string');
+  const opfDoc = parser.parseFromString(opfXmlRaw, 'application/xml');
 
   const titleNode = opfDoc.getElementsByTagNameNS('*', 'title')[0];
   const creatorNode = opfDoc.getElementsByTagNameNS('*', 'creator')[0];
@@ -427,6 +430,8 @@ async function parseEpubFile(file, originalName) {
     }
   }
 
+  const firstChTexts = book.chapters.slice(0, 3).map(c => c.snippet).join('\n');
+  book.clues = extractOriginalCluesFromText(firstChTexts, opfXmlRaw);
   return book;
 }
 
@@ -699,6 +704,30 @@ if (els.descInput) {
   });
 }
 
+
+function extractOriginalCluesFromText(rawText, opfXmlStr = '') {
+  const clues = { isbn: '', origTitle: '', origAuthor: '' };
+  const combined = (opfXmlStr + '\n' + (rawText || '').slice(0, 4000));
+
+  // Ищем ISBN-13 или ISBN-10
+  const isbnMatch = combined.match(/(?:isbn[^0-9xX]{0,10})?((?:97[89][-\s]?)?[0-9]{1,5}[-\s]?[0-9]+[-\s]?[0-9]+[-\s]?[0-9xX])/i);
+  if (isbnMatch) {
+    const digits = isbnMatch[1].replace(/[^0-9xX]/g, '');
+    if (digits.length === 10 || digits.length === 13) clues.isbn = digits;
+  }
+
+  // Ищем строчки вида "Оригинальное название: ..." / "Original title: ..." / "Title: ..."
+  const titlePatterns = [
+    /(?:оригинальное\s+название|название\s+в\s+оригинале|original\s+title|orig\.\s*title)\s*[:—\-]\s*([^\n\r<]{2,90})/i,
+    /©\s*[A-Z][a-z]+\s+[A-Z][a-z]+/
+  ];
+  const tm = (rawText || '').match(titlePatterns[0]);
+  if (tm && tm[1]) {
+    clues.origTitle = tm[1].replace(/["«»]/g, '').trim();
+  }
+  return clues;
+}
+
 function stripHtmlTags(raw) {
   if (!raw) return '';
   const doc = new DOMParser().parseFromString(raw, 'text/html');
@@ -710,75 +739,189 @@ function hasCyrillic(text) {
   return cyr > text.length * 0.15;
 }
 
-async function translateToRussian(text) {
+async function translateText(text, targetLang = 'ru') {
   const trimmed = (text || '').trim();
   if (!trimmed) return '';
-  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ru&dt=t&q=' + encodeURIComponent(trimmed);
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=` + encodeURIComponent(trimmed);
   const res = await fetch(url);
   if (!res.ok) throw new Error('Сервис перевода временно недоступен');
   const data = await res.json();
   return (data[0] || []).map(part => part[0]).join('');
 }
 
-async function searchBookDescriptionOnline(title, author) {
-  const cleanTitle = (title || '').replace(/[_\-]+/g, ' ').trim();
-  const cleanAuthor = (author || '').trim();
-  if (!cleanTitle) throw new Error('Укажите название книги для поиска');
+async function translateToRussian(text) {
+  return translateText(text, 'ru');
+}
 
-  const queries = [];
-  if (cleanAuthor) {
-    queries.push(`intitle:${cleanTitle} inauthor:${cleanAuthor}`);
-    queries.push(`${cleanTitle} ${cleanAuthor}`);
-  }
-  queries.push(cleanTitle);
-
-  // 1. Ищем в Google Books API
-  for (const q of queries) {
-    try {
-      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=8`;
-      const res = await fetch(url);
-      if (!res.ok) continue;
-      const data = await res.json();
-      const items = data.items || [];
-      // Сначала ищем русское описание, если нет — берём самое подробное на любом языке
-      let bestDesc = '';
-      for (const item of items) {
-        const raw = item.volumeInfo && item.volumeInfo.description;
-        const clean = stripHtmlTags(raw);
-        if (clean.length > 60) {
-          if (hasCyrillic(clean)) return clean;
-          if (clean.length > bestDesc.length) bestDesc = clean;
-        }
-      }
-      if (bestDesc) return bestDesc;
-    } catch (e) {
-      console.warn('Google Books query error:', e);
-    }
-  }
-
-  // 2. Резервный поиск в OpenLibrary
+async function fetchGoogleBooksCandidates(query) {
   try {
-    const q = cleanAuthor ? `${cleanTitle} ${cleanAuthor}` : cleanTitle;
-    const res = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&limit=5`);
-    if (res.ok) {
-      const data = await res.json();
-      for (const doc of (data.docs || [])) {
-        if (!doc.key) continue;
-        const wRes = await fetch(`https://openlibrary.org${doc.key}.json`);
-        if (!wRes.ok) continue;
-        const wData = await wRes.json();
-        const rawDesc = typeof wData.description === 'string'
-          ? wData.description
-          : (wData.description && wData.description.value) || '';
-        const clean = stripHtmlTags(rawDesc);
-        if (clean.length > 50) return clean;
-      }
+    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=10`;
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const out = [];
+    for (const item of (data.items || [])) {
+      const info = item.volumeInfo || {};
+      const desc = stripHtmlTags(info.description || '');
+      if (desc.length < 40) continue;
+      let thumb = (info.imageLinks && (info.imageLinks.extraLarge || info.imageLinks.large || info.imageLinks.medium || info.imageLinks.thumbnail)) || '';
+      if (thumb.startsWith('http://')) thumb = thumb.replace('http://', 'https://');
+      out.push({
+        title: info.title || 'Без названия',
+        authors: (info.authors || []).join(', '),
+        year: (info.publishedDate || '').slice(0, 4),
+        description: desc,
+        coverUrl: thumb
+      });
     }
-  } catch (e) {
-    console.warn('OpenLibrary fallback error:', e);
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+async function smartFindFanTranslationCandidates(book) {
+  const cleanTitle = (book.title || '').replace(/[_\-]+/g, ' ').trim();
+  const cleanAuthor = (book.author || '').trim();
+  const clues = book.clues || {};
+  const allCandidates = [];
+  const seenKeys = new Set();
+
+  function addUnique(list, sourceNote) {
+    for (const c of list) {
+      const key = (c.title + '|' + c.description.slice(0, 50)).toLowerCase();
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      allCandidates.push({ ...c, sourceNote });
+    }
   }
 
-  return '';
+  // Шаг 1: Если внутри файла книги нашёлся ISBN или "Оригинальное название: ..."
+  if (clues.isbn) {
+    addUnique(await fetchGoogleBooksCandidates(`isbn:${clues.isbn}`), `По ISBN из файла (${clues.isbn})`);
+  }
+  if (clues.origTitle) {
+    addUnique(await fetchGoogleBooksCandidates(clues.origTitle), `По оригинальному названию из текста (${clues.origTitle})`);
+  }
+
+  // Шаг 2: Прямой поиск по русскому названию и автору
+  if (cleanTitle && cleanAuthor) {
+    addUnique(await fetchGoogleBooksCandidates(`${cleanTitle} ${cleanAuthor}`), 'Прямое совпадение');
+  }
+
+  // Шаг 3: Обратный перевод фанатского названия и автора на английский!
+  let enTitle = '';
+  let enAuthor = '';
+  try {
+    if (cleanTitle && hasCyrillic(cleanTitle)) enTitle = await translateText(cleanTitle, 'en');
+    if (cleanAuthor && hasCyrillic(cleanAuthor)) enAuthor = await translateText(cleanAuthor, 'en');
+  } catch {}
+
+  if (enTitle && enAuthor) {
+    addUnique(await fetchGoogleBooksCandidates(`${enTitle} ${enAuthor}`), `Перевод названия: «${enTitle}» · ${enAuthor}`);
+  }
+  if (enTitle) {
+    addUnique(await fetchGoogleBooksCandidates(`intitle:${enTitle}`), `Перевод названия: «${enTitle}»`);
+  }
+
+  // Шаг 4: Если название перевели неузнаваемо — ищем все популярные книги этого автора (на англ. и рус.), чтобы дать выбрать из списка!
+  if (enAuthor) {
+    addUnique(await fetchGoogleBooksCandidates(`inauthor:${enAuthor}`), `Книги автора (${enAuthor})`);
+  }
+  if (cleanAuthor) {
+    addUnique(await fetchGoogleBooksCandidates(`inauthor:${cleanAuthor}`), `Книги автора (${cleanAuthor})`);
+  }
+  if (cleanTitle && allCandidates.length === 0) {
+    addUnique(await fetchGoogleBooksCandidates(cleanTitle), 'По названию');
+  }
+
+  return { candidates: allCandidates, enTitle, enAuthor, clues };
+}
+
+async function applyCandidateToBook(book, cand) {
+  els.statusText.textContent = 'Подставляем и переводим аннотацию...';
+  let desc = cand.description;
+  if (!hasCyrillic(desc)) {
+    try {
+      desc = await translateToRussian(desc);
+    } catch {}
+  }
+  book.description = desc;
+  els.descInput.value = desc;
+
+  if (els.detectedOrigRow) {
+    els.detectedOrigRow.classList.remove('hidden');
+    els.detectedOrigRow.textContent = `Оригинал: ${cand.title}${cand.authors ? ' — ' + cand.authors : ''}${cand.year ? ' (' + cand.year + ')' : ''}`;
+  }
+  els.statusText.textContent = 'Аннотация подставлена';
+}
+
+function renderCandidatesList(book, candidates) {
+  if (!els.searchCandidatesBox) return;
+  if (!candidates || candidates.length <= 1) {
+    els.searchCandidatesBox.classList.add('hidden');
+    els.searchCandidatesBox.innerHTML = '';
+    return;
+  }
+
+  els.searchCandidatesBox.classList.remove('hidden');
+  els.searchCandidatesBox.innerHTML = '<div style="font-size:12px;color:var(--text-secondary);padding:2px 4px;">Другие варианты (нажмите, если у вас фанатское название):</div>';
+
+  candidates.slice(0, 8).forEach((cand) => {
+    const row = document.createElement('div');
+    row.className = 'candidate-item';
+    row.innerHTML = `
+      <div class="candidate-main">
+        <div class="candidate-title">${escapeXml(cand.title)} ${cand.year ? '(' + escapeXml(cand.year) + ')' : ''}</div>
+        <div class="candidate-sub">${escapeXml(cand.authors || cand.sourceNote || '')}</div>
+      </div>
+      <div class="candidate-actions">
+        ${cand.coverUrl ? '<button type="button" class="btn-secondary btn-sm take-cover-btn">Обложка</button>' : ''}
+        <button type="button" class="btn-secondary btn-sm take-desc-btn">Выбрать</button>
+      </div>
+    `;
+
+    row.querySelector('.take-desc-btn').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await applyCandidateToBook(book, cand);
+    });
+
+    const coverBtn = row.querySelector('.take-cover-btn');
+    if (coverBtn) {
+      coverBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        coverBtn.disabled = true;
+        coverBtn.textContent = '...';
+        try {
+          const res = await fetch(cand.coverUrl);
+          const blob = await res.blob();
+          if (book.cover && book.cover.url) URL.revokeObjectURL(book.cover.url);
+          book.cover = {
+            blob,
+            mime: blob.type || 'image/jpeg',
+            url: URL.createObjectURL(blob),
+            originalPath: book.cover ? book.cover.originalPath : null,
+            id: book.cover ? book.cover.id : null,
+            changed: true,
+            removed: false
+          };
+          renderCover();
+          els.statusText.textContent = 'Обложка из сети установлена';
+        } catch {
+          alert('Не удалось скачать эту обложку напрямую.');
+        } finally {
+          coverBtn.disabled = false;
+          coverBtn.textContent = 'Обложка';
+        }
+      });
+    }
+
+    row.addEventListener('click', async () => {
+      await applyCandidateToBook(book, cand);
+    });
+
+    els.searchCandidatesBox.appendChild(row);
+  });
 }
 
 if (els.findDescBtn) {
@@ -787,24 +930,20 @@ if (els.findDescBtn) {
     if (!book) return;
     const origLabel = els.findDescBtn.textContent;
     els.findDescBtn.disabled = true;
-    els.findDescBtn.textContent = 'Ищем...';
-    els.statusText.textContent = 'Ищем описание книги в сети...';
+    els.findDescBtn.textContent = 'Ищем оригинал...';
+    els.statusText.textContent = 'Проверяем ISBN, переводим название и ищем книги автора...';
 
     try {
-      let found = await searchBookDescriptionOnline(book.title, book.author);
-      if (!found) {
-        alert('По этому названию описание не нашлось. Попробуйте уточнить оригинальное название книги или имя автора.');
+      const { candidates } = await smartFindFanTranslationCandidates(book);
+      if (!candidates.length) {
+        alert('Ни по русскому, ни по английскому переводу названия ничего не нашлось. Попробуйте вписать хотя бы фамилию автора или оригинальное название в поле «Название книги».');
         els.statusText.textContent = 'Описание не найдено';
         return;
       }
-      if (!hasCyrillic(found)) {
-        els.findDescBtn.textContent = 'Переводим...';
-        els.statusText.textContent = 'Переводим найденную аннотацию на русский...';
-        found = await translateToRussian(found);
-      }
-      book.description = found;
-      els.descInput.value = found;
-      els.statusText.textContent = 'Аннотация найдена и подставлена';
+
+      // Сразу применяем лучший первый вариант и показываем остальные варианты на выбор!
+      await applyCandidateToBook(book, candidates[0]);
+      renderCandidatesList(book, candidates);
     } catch (err) {
       alert('Ошибка поиска: ' + err.message);
       els.statusText.textContent = 'Ошибка поиска';
@@ -865,6 +1004,8 @@ function renderAll() {
   els.seriesInput.value = book.series;
   els.seriesIndexInput.value = book.seriesIndex;
   if (els.descInput) els.descInput.value = book.description || '';
+  if (els.detectedOrigRow) els.detectedOrigRow.classList.add('hidden');
+  if (els.searchCandidatesBox) els.searchCandidatesBox.classList.add('hidden');
 
   els.statChapters.textContent = book.chapters.length;
   els.statParagraphs.textContent = book.totalParagraphs;
