@@ -50,6 +50,8 @@ const els = {
   coverGalleryGrid: document.getElementById('coverGalleryGrid'),
   removeCoverBtn: document.getElementById('removeCoverBtn'),
   titleInput: document.getElementById('titleInput'),
+  detectTitleBtn: document.getElementById('detectTitleBtn'),
+  titleDetectiveBox: document.getElementById('titleDetectiveBox'),
   authorInput: document.getElementById('authorInput'),
   seriesInput: document.getElementById('seriesInput'),
   seriesIndexInput: document.getElementById('seriesIndexInput'),
@@ -449,7 +451,8 @@ async function parseEpubFile(file, originalName) {
     }
   }
 
-  const firstChTexts = book.chapters.slice(0, 3).map(c => c.snippet).join('\n');
+  const firstChTexts = book.chapters.slice(0, 6).map(c => c.snippet).join('\n');
+  book. zipFileNames = Object.keys(zip.files);
   book.clues = extractOriginalCluesFromText(firstChTexts, opfXmlRaw);
   return book;
 }
@@ -1034,6 +1037,259 @@ if (els.translateDescBtn) {
   });
 }
 
+
+const RU_STOP_CAP = new Set([
+  'Глава', 'Часть', 'Пролог', 'Эпилог', 'Раздел', 'Книга', 'Том', 'Аннотация',
+  'Когда', 'После', 'Перед', 'Через', 'Между', 'Потому', 'Поэтому', 'Однако',
+  'Только', 'Просто', 'Сейчас', 'Сегодня', 'Вчера', 'Завтра', 'Здесь', 'Теперь',
+  'Может', 'Конечно', 'Наверное', 'Кажется', 'Впрочем', 'Кстати', 'Наконец',
+  'Словно', 'Будто', 'Точно', 'Вдруг', 'Почти', 'Совсем', 'Очень', ' Слишком',
+  'Никто', 'Ничто', 'Никогда', 'Всегда', 'Иногда', 'Почему', 'Зачем', 'Откуда',
+  'Сколько', 'Который', 'Которая', 'Которые', 'Такой', 'Такая', 'Такие', 'Этот',
+  'жизнь', 'время', 'человек', 'глаза', 'руки', 'голова', 'голос', 'слово', 'место'
+]);
+
+function extractBookFingerprint(book) {
+  // 1. Собираем текст из всех глав (сниппеты + образцы абзацев)
+  const textPool = [
+    ...(book.sampleParagraphs || []),
+    ...book.chapters.slice(0, 15).map(c => `${c.title || ''}. ${c.snippet || ''}`)
+  ].join(' ');
+
+  // 2. Ищем слова с заглавной буквы ВНУТРИ предложений (не после точки!), чтобы найти именно Имена героев, Фамилии и Названия мест/академий
+  const freq = new Map();
+  const midSentenceRe = /[а-яёa-z,\-—:;]\s+([А-ЯЁ][а-яё]{3,14})/g;
+  let m;
+  while ((m = midSentenceRe.exec(textPool)) !== null) {
+    const word = m[1];
+    if (RU_STOP_CAP.has(word) || RU_STOP_CAP.has(word.toLowerCase())) continue;
+    // Отсекаем глаголы и прилагательные по типичным окончаниям
+    if (/(?:ать|ять|еть|ить|уть|лся|лась|лись|ющий|аяся|оеся|ого|ому|ыми|ими)$/i.test(word)) continue;
+    freq.set(word, (freq.get(word) || 0) + 1);
+  }
+
+  const topEntities = Array.from(freq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(e => e[0]);
+
+  // 3. Проверяем внутренние имена файлов архива (часто обложка или папка внутри битого EPUB хранит настоящее английское название!)
+  const fileClues = [];
+  for (const fname of (book.zipFileNames || [])) {
+    const base = fname.split('/').pop().replace(/\.[a-z0-9]+$/i, '');
+    if (/^(?:index|split|part|section|chapter|ch|page|cover|style|stylesheet|toc|content|nav|title|image|img|pic|font)_?\d*$/i.test(base)) continue;
+    const cleaned = base.replace(/[_\-]+/g, ' ').replace(/\d{3,}/g, '').trim();
+    if (cleaned.length >= 5 && /[a-zA-Z]{4,}/.test(cleaned) && !/^(?:oebps|meta inf|ops|text|images|fonts)$/i.test(cleaned)) {
+      fileClues.push(cleaned);
+    }
+  }
+
+  // 4. Берём характерную цитату из первого длинного сюжетного абзаца
+  const quoteSample = (book.sampleParagraphs && book.sampleParagraphs[0])
+    ? book.sampleParagraphs[0].slice(0, 140).trim()
+    : '';
+
+  return {
+    entities: topEntities,
+    fileClue: fileClues[0] || '',
+    isbn: (book.clues && book.clues.isbn) || '',
+    origTitleClue: (book.clues && book.clues.origTitle) || '',
+    quoteSample
+  };
+}
+
+async function runDeepBookTitleDetective(book) {
+  const fp = extractBookFingerprint(book);
+  const foundMap = new Map();
+
+  async function addFromQuery(q, reason) {
+    if (!q || q.trim().length < 3) return;
+    const list = await fetchGoogleBooksCandidates(q);
+    for (const item of list) {
+      const key = (item.title + '|' + item.authors).toLowerCase();
+      if (!foundMap.has(key)) {
+        foundMap.set(key, { ...item, reason });
+      }
+    }
+  }
+
+  // Уровень 1: Скрытые улики в файле (ISBN, "Оригинальное название", имя файла обложки внутри архива)
+  if (fp.isbn) await addFromQuery(`isbn:${fp.isbn}`, `По скрытому ISBN (${fp.isbn})`);
+  if (fp.origTitleClue) await addFromQuery(fp.origTitleClue, `Из текста («${fp.origTitleClue}»)`);
+  if (fp.fileClue) await addFromQuery(fp.fileClue, `По имени файла внутри архива («${fp.fileClue}»)`);
+
+  // Уровень 2: Поиск по СВЯЗКЕ главных героев/мест на русском (находит русские издания и фан-переводы в Google Books)
+  if (fp.entities.length >= 2) {
+    const ruCluster = fp.entities.slice(0, 3).join(' ');
+    await addFromQuery(ruCluster, `По связке героев/мест: ${ruCluster}`);
+    if (book.author && book.author.trim()) {
+      await addFromQuery(`${ book.author.trim() } ${fp.entities[0]}`, `Автор + герой (${fp.entities[0]})`);
+    }
+  }
+
+  // Уровень 3: Переводим связку главных героев + кусок текста на АНГЛИЙСКИЙ и ищем английский оригинал!
+  let enEntities = '';
+  if (fp.entities.length >= 2) {
+    try {
+      enEntities = await translateText(fp.entities.slice(0, 4).join(', '), 'en');
+      const cleanEnCluster = enEntities.replace(/[,.;]/g, ' ').replace(/\s+/g, ' ').trim();
+      await addFromQuery(cleanEnCluster, `По англ. связке героев: ${cleanEnCluster}`);
+    } catch {}
+  }
+
+  // Если в книге было хоть какое-то битое/фанатское название — тоже пробуем его перевести в связке с главным героем
+  const rawTitle = (book.title || '').replace(/[_\d]+/g, ' ').trim();
+  if (rawTitle.length > 2 && !/^(?:без названия|book|epub|текст)$/i.test(rawTitle)) {
+    try {
+      const enTitleGuess = hasCyrillic(rawTitle) ? await translateText(rawTitle, 'en') : rawTitle;
+      const hero = enEntities ? enEntities.split(',')[0].trim() : '';
+      await addFromQuery(`${enTitleGuess} ${hero}`.trim(), `Перевод названия + герой: ${enTitleGuess}`);
+    } catch {}
+  }
+
+  // Уровень 4: OpenLibrary поиск по английским ключевым словам сюжета/персонажей
+  if (foundMap.size < 3 && enEntities) {
+    try {
+      const q = enEntities.replace(/,/g, ' ').trim();
+      const res = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&limit=5`);
+      if (res.ok) {
+        const data = await res.json();
+        for (const d of (data.docs || [])) {
+          if (!d.title) continue;
+          const key = (d.title + '|' + (d.author_name ? d.author_name[0] : '')).toLowerCase();
+          if (!foundMap.has(key)) {
+            foundMap.set(key, {
+              title: d.title,
+              authors: (d.author_name || []).join(', '),
+              year: String(d.first_publish_year || ''),
+              description: '',
+              coverUrl: d.cover_i ? `https://covers.openlibrary.org/b/id/${d.cover_i}-L.jpg` : '',
+              reason: `OpenLibrary (${q})`
+            });
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // Готовим для топ-4 находок варианты перевода названия на русский!
+  const candidates = Array.from(foundMap.values()).slice(0, 4);
+  for (const cand of candidates) {
+    cand.titleVariants = [];
+    const orig = cand.title.trim();
+
+    if (hasCyrillic(orig)) {
+      cand.titleVariants.push({ label: 'Русское название', value: orig });
+      try {
+        const enBack = await translateText(orig, 'en');
+        if (enBack && enBack.toLowerCase() !== orig.toLowerCase()) {
+          cand.titleVariants.push({ label: 'На англ.', value: enBack });
+        }
+      } catch {}
+    } else {
+      // Если найдена английская книга — делаем перевод названия на русский + оставляем оригинал и комбинированный вариант
+      try {
+        const ruTranslated = await translateToRussian(orig);
+        if (ruTranslated) {
+          cand.titleVariants.push({ label: 'Перевод на рус.', value: ruTranslated });
+          cand.titleVariants.push({ label: 'Рус + Ориг', value: `${ruTranslated} (${orig})` });
+        }
+      } catch {}
+      cand.titleVariants.push({ label: 'Оригинал (EN)', value: orig });
+    }
+
+    // Также переводим имя автора на русский, если оно на английском
+    if (cand.authors && !hasCyrillic(cand.authors)) {
+      try {
+        cand.ruAuthors = await translateToRussian(cand.authors);
+      } catch {
+        cand.ruAuthors = cand.authors;
+      }
+    } else {
+      cand.ruAuthors = cand.authors;
+    }
+  }
+
+  return { fp, enEntities, candidates };
+}
+
+if (els.detectTitleBtn) {
+  els.detectTitleBtn.addEventListener('click', async () => {
+    const book = activeBook();
+    if (!book) return;
+
+    const oldBtnText = els.detectTitleBtn.textContent;
+    els.detectTitleBtn.disabled = true;
+    els.detectTitleBtn.textContent = 'Анализируем текст...';
+    els.titleDetectiveBox.classList.remove('hidden');
+    els.titleDetectiveBox.innerHTML = '<div class="detective-clues">Собираем имена героев, редкие слова и скрытые метки файла...</div>';
+
+    try {
+      const { fp, enEntities, candidates } = await runDeepBookTitleDetective(book);
+
+      const cluesParts = [];
+      if (fp.entities.length) cluesParts.push(`Герои/места в тексте: <b>${escapeXml(fp.entities.join(', '))}</b>`);
+      if (enEntities) cluesParts.push(`На англ.: <b>${escapeXml(enEntities)}</b>`);
+      if (fp.fileClue) cluesParts.push(`Скрытое имя в архиве: <b>${escapeXml(fp.fileClue)}</b>`);
+      if (fp.isbn) cluesParts.push(`ISBN: <b>${escapeXml(fp.isbn)}</b>`);
+
+      let html = `<div class="detective-clues">${cluesParts.join(' · ') || 'Текст проанализирован'}</div>`;
+
+      if (!candidates.length) {
+        html += `<div class="detective-clues">Точного совпадения в базах не нашлось. Попробуйте нажать по найденным именам выше или ввести одно ключевое слово в поле названия.</div>`;
+        els.titleDetectiveBox.innerHTML = html;
+        return;
+      }
+
+      els.titleDetectiveBox.innerHTML = html;
+
+      candidates.forEach((cand) => {
+        const itemEl = document.createElement('div');
+        itemEl.className = 'detective-item';
+
+        const pillsHtml = (cand.titleVariants || []).map((v, i) => `
+          <button type="button" class="title-choice-btn" data-idx="${i}">
+            <span class="title-choice-tag">${escapeXml(v.label)}:</span>
+            <b>${escapeXml(v.value)}</b>
+          </button>
+        `).join('');
+
+        itemEl.innerHTML = `
+          <div class="detective-head">
+            <span class="detective-orig">${escapeXml(cand.reason || '')} · Автор: <b>${escapeXml(cand.ruAuthors || cand.authors || 'Неизвестен')}</b></span>
+          </div>
+          <div class="detective-pills">${pillsHtml}</div>
+        `;
+
+        itemEl.querySelectorAll('.title-choice-btn').forEach(btn => {
+          btn.addEventListener('click', async () => {
+            const v = cand.titleVariants[Number(btn.getAttribute('data-idx'))];
+            if (!v) return;
+            book.title = v.value;
+            els.titleInput.value = v.value;
+            if (cand.ruAuthors && !book.author) {
+              book.author = cand.ruAuthors;
+              els.authorInput.value = cand.ruAuthors;
+            }
+            if (cand.description) {
+              await applyCandidateToBook(book, cand);
+            }
+            renderQueue();
+            els.statusText.textContent = `Установлено название: «${v.value}»`;
+          });
+        });
+
+        els.titleDetectiveBox.appendChild(itemEl);
+      });
+    } catch (err) {
+      els.titleDetectiveBox.innerHTML = `<div class="detective-clues">Ошибка при поиске: ${escapeXml(err.message)}</div>`;
+    } finally {
+      els.detectTitleBtn.disabled = false;
+      els.detectTitleBtn.textContent = oldBtnText;
+    }
+  });
+}
+
 function renderAll() {
   const book = activeBook();
   if (!book) {
@@ -1060,6 +1316,7 @@ function renderAll() {
   if (els.detectedOrigRow) els.detectedOrigRow.classList.add('hidden');
   if (els.searchCandidatesBox) els.searchCandidatesBox.classList.add('hidden');
   if (els.coverGalleryPanel) els.coverGalleryPanel.classList.add('hidden');
+  if (els.titleDetectiveBox) els.titleDetectiveBox.classList.add('hidden');
 
   els.statChapters.textContent = book.chapters.length;
   els.statParagraphs.textContent = book.totalParagraphs;

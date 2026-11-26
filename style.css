@@ -1115,3 +1115,77 @@ body {
   border-top: 1px solid var(--border);
   text-align: center;
 }
+
+/* Панель детектива названия по тексту и сущностям */
+.detective-box {
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-inner);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detective-clues {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.detective-clues b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.detective-item {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detective-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.detective-orig {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.detective-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.title-choice-btn {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 140ms ease-out, background-color 140ms ease-out;
+}
+
+.title-choice-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.title-choice-tag {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-right: 4px;
+}
