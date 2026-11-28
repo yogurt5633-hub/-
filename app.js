@@ -1,4 +1,5 @@
 const SETTINGS_KEY = 'pereplet_settings_v2';
+const NAME_RULES_KEY = 'pereplet_name_rules_v1';
 
 const defaultSettings = {
   removeIndent: true,
@@ -15,6 +16,7 @@ const defaultSettings = {
   compressImages: false,
   insertDescPage: true,
   kindlePages: true,
+  namesInMeta: true,
   fontMode: 'keep',
   alignMode: 'keep'
 };
@@ -22,7 +24,9 @@ const defaultSettings = {
 const appState = {
   books: [],
   activeIndex: 0,
+  activeTab: 'edition',
   settings: loadSettings(),
+  nameRules: loadNameRules(),
   customFont: null // { name, ext, mime, buffer }
 };
 
@@ -107,7 +111,22 @@ const els = {
   toastBar: document.getElementById('toastBar'),
   bookModifiedBadge: document.getElementById('bookModifiedBadge'),
   exportBtn: document.getElementById('exportBtn'),
-  exportAllBtn: document.getElementById('exportAllBtn')
+  exportAllBtn: document.getElementById('exportAllBtn'),
+  namesTabBadge: document.getElementById('namesTabBadge'),
+  contentsTabBadge: document.getElementById('contentsTabBadge'),
+  namesTotalHitsBadge: document.getElementById('namesTotalHitsBadge'),
+  nameRuleForm: document.getElementById('nameRuleForm'),
+  nameFromInput: document.getElementById('nameFromInput'),
+  nameToInput: document.getElementById('nameToInput'),
+  nameGenderSelect: document.getElementById('nameGenderSelect'),
+  addNameRuleBtn: document.getElementById('addNameRuleBtn'),
+  detectedNamesBlock: document.getElementById('detectedNamesBlock'),
+  detectedNamesChips: document.getElementById('detectedNamesChips'),
+  nameRulesCountLabel: document.getElementById('nameRulesCountLabel'),
+  namesInMetaToggle: document.getElementById('namesInMetaToggle'),
+  clearNameRulesBtn: document.getElementById('clearNameRulesBtn'),
+  nameRulesEmpty: document.getElementById('nameRulesEmpty'),
+  nameRulesList: document.getElementById('nameRulesList')
 };
 
 function loadSettings() {
@@ -122,6 +141,48 @@ function loadSettings() {
 function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(appState.settings));
+  } catch {}
+}
+
+function loadNameRules() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(NAME_RULES_KEY));
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(r => r && typeof r.from === 'string' && typeof r.to === 'string' && Array.isArray(r.cases)).map(r => ({
+      id: r.id || Math.random().toString(36).slice(2),
+      enabled: r.enabled !== false,
+      from: r.from,
+      to: r.to,
+      gender: r.gender || 'auto',
+      expanded: false,
+      cases: r.cases.map(c => ({
+        code: c.code || 'custom',
+        label: c.label || '',
+        hint: c.hint || '',
+        from: String(c.from || ''),
+        to: String(c.to || '')
+      })),
+      extraPairs: Array.isArray(r.extraPairs)
+        ? r.extraPairs.map(p => ({ from: String(p.from || ''), to: String(p.to || '') }))
+        : []
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function saveNameRules() {
+  try {
+    const serializable = appState.nameRules.map(r => ({
+      id: r.id,
+      enabled: r.enabled,
+      from: r.from,
+      to: r.to,
+      gender: r.gender,
+      cases: r.cases,
+      extraPairs: r.extraPairs || []
+    }));
+    localStorage.setItem(NAME_RULES_KEY, JSON.stringify(serializable));
   } catch {}
 }
 
@@ -156,9 +217,11 @@ function updateChangesSummary() {
 
   const delImgs = book.images.filter(i => i.markedDelete).length;
   const delChs = book.chapters.filter(c => c.markedDelete).length;
+  const nameHits = getBookNameHitsTotal(book);
   const parts = [];
-  if (book.metaEdited) parts.push('текст/данные');
+  if (book.metaEdited) parts.push('данные');
   if (book.cover && (book.cover.changed || book.cover.removed)) parts.push('обложка');
+  if (nameHits > 0) parts.push(`имена (${nameHits})`);
   if (delChs > 0) parts.push(`-${delChs} гл.`);
   if (delImgs > 0) parts.push(`-${delImgs} карт.`);
 
@@ -169,6 +232,8 @@ function updateChangesSummary() {
     els.bookModifiedBadge.classList.toggle('hidden', !hasChanges);
     if (hasChanges) els.bookModifiedBadge.textContent = 'Есть правки';
   }
+
+  updateTabBadges(book, nameHits, delChs + delImgs);
 
   if (parts.length > 0) {
     els.statusText.textContent = `Правки: ${parts.join(', ')} · Готово к сборке`;
@@ -494,6 +559,7 @@ async function parseEpubFile(file, originalName) {
       path: fullPath,
       title: chTitle,
       snippet,
+      plainText: bodyText,
       charCount: bodyText.length,
       suspect: detectSuspectChapter(chTitle, bodyText),
       markedDelete: false
@@ -629,6 +695,7 @@ async function parseFb2File(file, originalName) {
       id: `ch-${idx + 1}`,
       title: chTitle,
       snippet: plainAccum.trim().slice(0, 110),
+      plainText: plainAccum.trim(),
       charCount: plainAccum.trim().length,
       suspect: detectSuspectChapter(chTitle, plainAccum),
       markedDelete: false,
@@ -676,6 +743,7 @@ async function parseTxtFile(file, originalName) {
       id: `ch-${book.chapters.length + 1}`,
       title: currentChTitle,
       snippet: chPlainAccum.trim().slice(0, 110),
+      plainText: chPlainAccum.trim(),
       charCount: chPlainAccum.trim().length,
       suspect: detectSuspectChapter(currentChTitle, chPlainAccum),
       markedDelete: false,
@@ -732,6 +800,7 @@ function syncControlsFromSettings() {
   if (els.compressImagesToggle) els.compressImagesToggle.checked = !!s.compressImages;
   if (els.insertDescPageToggle) els.insertDescPageToggle.checked = s.insertDescPage !== false;
   if (els.kindlePagesToggle) els.kindlePagesToggle.checked = s.kindlePages !== false;
+  if (els.namesInMetaToggle) els.namesInMetaToggle.checked = s.namesInMeta !== false;
   els.fontSelect.value = s.fontMode;
   els.alignSelect.value = s.alignMode;
   els.customFontRow.classList.toggle('hidden', s.fontMode !== 'custom');
@@ -766,6 +835,7 @@ bindSetting(els.stripMediaToggle, 'stripMedia', 'change');
   if (els.compressImagesToggle) bindSetting(els.compressImagesToggle, 'compressImages', 'change');
   if (els.insertDescPageToggle) bindSetting(els.insertDescPageToggle, 'insertDescPage', 'change');
   if (els.kindlePagesToggle) bindSetting(els.kindlePagesToggle, 'kindlePages', 'change');
+  if (els.namesInMetaToggle) bindSetting(els.namesInMetaToggle, 'namesInMeta', 'change');
 bindSetting(els.fontSelect, 'fontMode', 'change');
 bindSetting(els.alignSelect, 'alignMode', 'change');
 
@@ -1445,6 +1515,8 @@ function renderAll() {
   renderPreview();
   renderChaptersList();
   renderImagesGrid();
+  renderDetectedNames();
+  renderNameRules();
   updateChangesSummary();
 }
 
@@ -1712,7 +1784,7 @@ async function runCoverGallerySearch() {
             removed: false
           };
           renderCover();
-          cap.textContent = 'Установлена!';
+          cap.textContent = 'Установлена';
           markBookModified(book, 'Обложка из сети установлена');
         } catch (err) {
           alert('Не удалось скачать эту обложку: ' + err.message);
@@ -1835,8 +1907,10 @@ function renderPreview() {
         'Даже если в исходной книге были смешаны стили - теперь всё выглядит ровно.'
       ];
 
+  const namePlan = compileNameReplacementPlan(appState.nameRules);
   els.livePreview.innerHTML = samples.map(raw => {
     let t = s.removeIndent ? cleanLeadingSpaces(raw) : raw;
+    if (namePlan.hasRules) t = applyNameReplacementsToText(t, namePlan).text;
     if (s.fixDashes) t = applyDashFix(t, true).text;
     if (s.fixTypo) t = applyTypoFix(t).text;
     return `<p>${escapeXml(t)}</p>`;
@@ -1890,6 +1964,8 @@ els.markSuspectChaptersBtn.addEventListener('click', () => {
   if (!book) return;
   book.chapters.forEach(c => { if (c.suspect) c.markedDelete = true; });
   renderChaptersList();
+  renderNameRules();
+  updateChangesSummary();
 });
 
 els.keepAllChaptersBtn.addEventListener('click', () => {
@@ -1897,6 +1973,8 @@ els.keepAllChaptersBtn.addEventListener('click', () => {
   if (!book) return;
   book.chapters.forEach(c => { c.markedDelete = false; });
   renderChaptersList();
+  renderNameRules();
+  updateChangesSummary();
 });
 
 // Сетка картинок
@@ -1939,6 +2017,7 @@ els.selectAllImgsBtn.addEventListener('click', () => {
   if (!book) return;
   book.images.forEach(i => { i.markedDelete = true; });
   renderImagesGrid();
+  updateChangesSummary();
 });
 
 els.keepAllImgsBtn.addEventListener('click', () => {
@@ -1946,6 +2025,7 @@ els.keepAllImgsBtn.addEventListener('click', () => {
   if (!book) return;
   book.images.forEach(i => { i.markedDelete = false; });
   renderImagesGrid();
+  updateChangesSummary();
 });
 
 // Генерация CSS с учётом всех настроек пользователя
@@ -2403,8 +2483,14 @@ async function exportModifiedEpub(book, s) {
     }
   }
 
+  const namePlan = compileNameReplacementPlan(appState.nameRules);
+  const replaceMetaNames = namePlan.hasRules && s.namesInMeta !== false;
+
     // Аннотация (dc:description + опциональная страница в начале книги)
-  const descText = (book.description || '').trim();
+  let descText = (book.description || '').trim();
+  if (descText && replaceMetaNames) {
+    descText = applyNameReplacementsToText(descText, namePlan).text;
+  }
   let descNode = opfDoc.getElementsByTagNameNS('*', 'description')[0];
   if (descText) {
     if (!descNode && metadataNode) {
@@ -2441,7 +2527,16 @@ async function exportModifiedEpub(book, s) {
         const content = np.querySelector(':scope > content');
         if (!content) return;
         const resolved = resolveZipPath(ncxDir, content.getAttribute('src'));
-        if (deletedChPaths.has(resolved)) np.remove();
+        if (deletedChPaths.has(resolved)) {
+          np.remove();
+          return;
+        }
+        if (replaceMetaNames) {
+          const lbl = np.querySelector('navLabel > text');
+          if (lbl && lbl.textContent) {
+            lbl.textContent = applyNameReplacementsToText(lbl.textContent, namePlan).text;
+          }
+        }
       });
       zip.file(ncxPath, serializer.serializeToString(ncxDoc));
     }
@@ -2636,6 +2731,11 @@ async function exportModifiedEpub(book, s) {
       });
     }
 
+    // Замена имён героев во всех текстовых узлах главы (до мягких переносов)
+    if (namePlan.hasRules && doc.body) {
+      applyNameReplacementsToDoc(doc.body, namePlan);
+    }
+
     // Правка абзацев
     getTextParagraphBlocks(doc).forEach(p => {
       if (s.cleanEmpty && isParagraphEmpty(p)) {
@@ -2711,7 +2811,8 @@ async function exportModifiedEpub(book, s) {
             np.setAttribute('playOrder', String(idx + 1));
             const nl = ncxDoc.createElementNS(nsNcx, 'navLabel');
             const tx = ncxDoc.createElementNS(nsNcx, 'text');
-            tx.textContent = ch.title || `Глава ${idx + 1}`;
+            const rawChTitle = ch.title || `Глава ${idx + 1}`;
+            tx.textContent = replaceMetaNames ? applyNameReplacementsToText(rawChTitle, namePlan).text : rawChTitle;
             nl.appendChild(tx);
             const ct = ncxDoc.createElementNS(nsNcx, 'content');
             // Вычисляем путь относительно папки ncx
@@ -2790,7 +2891,13 @@ ${buildOverrideCss(s, customFontRel)}
     spineLines.push(`<itemref idref="cover-page"/>`);
   }
 
-    const descText = (book.description || '').trim();
+  const namePlan = compileNameReplacementPlan(appState.nameRules);
+  const replaceMetaNames = namePlan.hasRules && s.namesInMeta !== false;
+
+  let descText = (book.description || '').trim();
+  if (descText && replaceMetaNames) {
+    descText = applyNameReplacementsToText(descText, namePlan).text;
+  }
   if (descText && s.insertDescPage !== false) {
     const pars = descText.split(/\r?\n+/).filter(Boolean).map(p => `<p>${escapeXml(p)}</p>`).join('\n');
     outZip.file('OEBPS/annotation.xhtml', `<?xml version="1.0" encoding="utf-8"?>
@@ -2830,6 +2937,10 @@ ${buildOverrideCss(s, customFontRel)}
       }
     });
 
+    if (namePlan.hasRules) {
+      applyNameReplacementsToDoc(doc.documentElement, namePlan);
+    }
+
     doc.querySelectorAll('p').forEach(p => {
       if (s.cleanEmpty && (p.classList.contains('empty-line') || isParagraphEmpty(p))) {
         p.remove();
@@ -2845,16 +2956,17 @@ ${buildOverrideCss(s, customFontRel)}
       injectKindlePageAnchors(doc, true, fileName, kindleState);
     }
 
+    const chTitleOut = replaceMetaNames ? applyNameReplacementsToText(ch.title, namePlan).text : ch.title;
     const bodyInner = Array.from(doc.documentElement.childNodes).map(n => serializer.serializeToString(n)).join('\n');
     outZip.file(`OEBPS/${fileName}`, `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
-<head><title>${escapeXml(ch.title)}</title><link rel="stylesheet" type="text/css" href="style.css"/></head>
+<head><title>${escapeXml(chTitleOut)}</title><link rel="stylesheet" type="text/css" href="style.css"/></head>
 <body>\n${bodyInner}\n</body></html>`);
 
     manifestLines.push(`<item id="${fileId}" href="${fileName}" media-type="application/xhtml+xml"/>`);
     spineLines.push(`<itemref idref="${fileId}"/>`);
-    navPoints.push(`<navPoint id="nav-${idx + 1}" playOrder="${idx + 1}"><navLabel><text>${escapeXml(ch.title)}</text></navLabel><content src="${fileName}"/></navPoint>`);
+    navPoints.push(`<navPoint id="nav-${idx + 1}" playOrder="${idx + 1}"><navLabel><text>${escapeXml(chTitleOut)}</text></navLabel><content src="${fileName}"/></navPoint>`);
   });
 
   const bookUuid = 'urn:uuid:' + (crypto.randomUUID ? crypto.randomUUID() : Date.now());
@@ -2888,3 +3000,710 @@ ${buildOverrideCss(s, customFontRel)}
 
   return await outZip.generateAsync({ type: 'blob', mimeType: 'application/epub+zip' });
 }
+
+/* ============================================================================
+   Вкладки разделов и модуль автозамены имён с таблицей склонений
+   ============================================================================ */
+
+function switchWorkspaceTab(tabName) {
+  appState.activeTab = tabName;
+  document.querySelectorAll('.workspace-tab').forEach(btn => {
+    const isActive = btn.getAttribute('data-tab') === tabName;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+  document.querySelectorAll('[data-tab-panel]').forEach(panel => {
+    panel.classList.toggle('hidden', panel.getAttribute('data-tab-panel') !== tabName);
+  });
+}
+
+document.querySelectorAll('.workspace-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    switchWorkspaceTab(btn.getAttribute('data-tab'));
+  });
+});
+
+function updateTabBadges(book, nameHits, contentsDelCount) {
+  if (els.namesTabBadge) {
+    const activeRuleCount = appState.nameRules.filter(r => r.enabled).length;
+    const showVal = nameHits > 0 ? nameHits : activeRuleCount;
+    els.namesTabBadge.classList.toggle('hidden', showVal === 0);
+    els.namesTabBadge.textContent = String(showVal);
+  }
+  if (els.contentsTabBadge) {
+    els.contentsTabBadge.classList.toggle('hidden', contentsDelCount === 0);
+    els.contentsTabBadge.textContent = String(contentsDelCount);
+  }
+  if (els.namesTotalHitsBadge) {
+    els.namesTotalHitsBadge.textContent = `${nameHits} совп.`;
+  }
+}
+
+const RU_CASE_META = [
+  { code: 'nom', label: 'И.п.', hint: 'кто?' },
+  { code: 'gen', label: 'Р.п.', hint: 'кого?' },
+  { code: 'dat', label: 'Д.п.', hint: 'кому?' },
+  { code: 'acc', label: 'В.п.', hint: 'кого?' },
+  { code: 'ins', label: 'Т.п.', hint: 'кем?' },
+  { code: 'pre', label: 'П.п.', hint: 'о ком?' }
+];
+
+const MALE_A_YA_NAMES = new Set([
+  'никита', 'илья', 'лука', 'фома', 'кузьма', 'савва', 'данила', 'гаврила',
+  'миша', 'саша', 'паша', 'дима', 'коля', 'ваня', 'петя', 'серёжа', 'сережа',
+  'лёша', 'леша', 'стёпа', 'степа', 'вася', 'женя', 'гриша', 'боря', 'толя',
+  'витя', 'юра', 'гена', 'рома', 'слава', 'сева', 'даня', 'тима', 'костя',
+  'федя', 'гоша', 'сеня', 'яша', 'кеша', 'антоша', 'вова', 'джошуа'
+]);
+
+const GENDER_LABELS = { auto: 'Авто', m: 'Муж.', f: 'Жен.', indecl: 'Нескл.' };
+
+function isIndeclinableRussianWord(word, gender) {
+  const low = (word || '').trim().toLowerCase();
+  if (!low || !/[а-яё]/.test(low)) return true;
+  if (gender === 'indecl') return true;
+  if (/[оеёиуюэ]$/.test(low) || /[оуеэ]а$/.test(low)) return true;
+  if (gender === 'f' && !/[ая]$/.test(low)) return true;
+  return false;
+}
+
+function detectNameGender(fullName) {
+  const firstWord = (fullName || '').trim().split(/\s+/)[0] || '';
+  const low = firstWord.toLowerCase();
+  if (!low || !/[а-яё]/.test(low)) return 'indecl';
+  if (/[оеёиуюэ]$/.test(low) || /[оуеэ]а$/.test(low)) return 'indecl';
+  if (MALE_A_YA_NAMES.has(low)) return 'm';
+  if (/[ая]$/.test(low)) return 'f';
+  return 'm';
+}
+function declineSingleRussianWord(word, gender) {
+  const w = (word || '').trim();
+  const same = { nom: w, gen: w, dat: w, acc: w, ins: w, pre: w };
+  if (!w || isIndeclinableRussianWord(w, gender)) return same;
+
+  const low = w.toLowerCase();
+  const isAllCaps = w === w.toUpperCase() && w !== low;
+  const applyEnd = (stem, end) => stem + (isAllCaps ? end.toUpperCase() : end);
+
+  if (low === 'павел') {
+    const st = w.slice(0, -2) + w.slice(-1);
+    return { nom: w, gen: applyEnd(st, 'а'), dat: applyEnd(st, 'у'), acc: applyEnd(st, 'а'), ins: applyEnd(st, 'ом'), pre: applyEnd(st, 'е') };
+  }
+  if (low === 'лев') {
+    const st = w.slice(0, 1) + (isAllCaps ? 'ЬВ' : 'ьв');
+    return { nom: w, gen: applyEnd(st, 'а'), dat: applyEnd(st, 'у'), acc: applyEnd(st, 'а'), ins: applyEnd(st, 'ом'), pre: applyEnd(st, 'е') };
+  }
+  if (low === 'пётр' || low === 'петр') {
+    const st = w.slice(0, 1) + (isAllCaps ? 'ЕТР' : 'етр');
+    return { nom: w, gen: applyEnd(st, 'а'), dat: applyEnd(st, 'у'), acc: applyEnd(st, 'а'), ins: applyEnd(st, 'ом'), pre: applyEnd(st, 'е') };
+  }
+
+  if (low.endsWith('ия')) {
+    const st = w.slice(0, -1);
+    return { nom: w, gen: applyEnd(st, 'и'), dat: applyEnd(st, 'и'), acc: applyEnd(st, 'ю'), ins: applyEnd(st, 'ей'), pre: applyEnd(st, 'и') };
+  }
+  if (low.endsWith('а')) {
+    const st = w.slice(0, -1);
+    const prev = low.slice(-2, -1);
+    const genEnd = /[гкхжчшщ]/.test(prev) ? 'и' : 'ы';
+    const insEnd = /[жчшщц]/.test(prev) ? 'ей' : 'ой';
+    return { nom: w, gen: applyEnd(st, genEnd), dat: applyEnd(st, 'е'), acc: applyEnd(st, 'у'), ins: applyEnd(st, insEnd), pre: applyEnd(st, 'е') };
+  }
+  if (low.endsWith('я')) {
+    const st = w.slice(0, -1);
+    const prev = low.slice(-2, -1);
+    const insEnd = prev === 'ь' && low === 'илья' ? 'ёй' : 'ей';
+    return { nom: w, gen: applyEnd(st, 'и'), dat: applyEnd(st, 'е'), acc: applyEnd(st, 'ю'), ins: applyEnd(st, insEnd), pre: applyEnd(st, 'е') };
+  }
+  if (low.endsWith('ий')) {
+    const st = w.slice(0, -1);
+    return { nom: w, gen: applyEnd(st, 'я'), dat: applyEnd(st, 'ю'), acc: applyEnd(st, 'я'), ins: applyEnd(st, 'ем'), pre: applyEnd(st, 'и') };
+  }
+  if (low.endsWith('й') || low.endsWith('ь')) {
+    const st = w.slice(0, -1);
+    return { nom: w, gen: applyEnd(st, 'я'), dat: applyEnd(st, 'ю'), acc: applyEnd(st, 'я'), ins: applyEnd(st, 'ем'), pre: applyEnd(st, 'е') };
+  }
+
+  const last = low.slice(-1);
+  const insEnd = /[жчшщц]/.test(last) ? 'ем' : 'ом';
+  return { nom: w, gen: applyEnd(w, 'а'), dat: applyEnd(w, 'у'), acc: applyEnd(w, 'а'), ins: applyEnd(w, insEnd), pre: applyEnd(w, 'е') };
+}
+
+function declineRussianName(fullName, genderMode = 'auto') {
+  const cleaned = (fullName || '').replace(/\s+/g, ' ').trim();
+  const resolvedGender = genderMode === 'auto' ? detectNameGender(cleaned) : genderMode;
+  const parts = cleaned ? cleaned.split(' ') : [''];
+  const declinedParts = parts.map((part, idx) => {
+    const partGender = (idx > 0 && resolvedGender === 'f' && !/[ая]$/.test(part.toLowerCase()))
+      ? 'indecl'
+      : resolvedGender;
+    return declineSingleRussianWord(part, partGender);
+  });
+
+  const cases = {};
+  for (const meta of RU_CASE_META) {
+    cases[meta.code] = declinedParts.map(d => d[meta.code]).join(' ');
+  }
+  return { gender: resolvedGender, cases };
+}
+
+function buildCaseRows(fromName, toName, genderMode = 'auto') {
+  const fromGender = genderMode === 'auto' ? detectNameGender(fromName) : genderMode;
+  const toGender = genderMode === 'auto' ? detectNameGender(toName) : genderMode;
+  const decFrom = declineRussianName(fromName, fromGender);
+  const decTo = declineRussianName(toName, toGender);
+  return RU_CASE_META.map(meta => ({
+    code: meta.code,
+    label: meta.label,
+    hint: meta.hint,
+    from: decFrom.cases[meta.code],
+    to: decTo.cases[meta.code]
+  }));
+}
+
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const WORD_CHAR_RE = /[а-яёА-ЯЁa-zA-Z0-9]/;
+
+const PREPOSITION_CASE_MAP = {
+  'у': 'gen', 'от': 'gen', 'ото': 'gen', 'из': 'gen', 'изо': 'gen', 'без': 'gen', 'безо': 'gen',
+  'для': 'gen', 'до': 'gen', 'после': 'gen', 'около': 'gen', 'возле': 'gen', 'вокруг': 'gen',
+  'мимо': 'gen', 'против': 'gen', 'ради': 'gen', 'кроме': 'gen', 'вместо': 'gen', 'из-за': 'gen',
+  'к': 'dat', 'ко': 'dat', 'благодаря': 'dat', 'вопреки': 'dat', 'навстречу': 'dat',
+  'с': 'ins', 'со': 'ins', 'над': 'ins', 'надо': 'ins', 'под': 'ins', 'подо': 'ins',
+  'перед': 'ins', 'передо': 'ins', 'между': 'ins', 'рядом с': 'ins',
+  'о': 'pre', 'об': 'pre', 'обо': 'pre', 'при': 'pre'
+};
+
+function preserveWordCase(matched, replacement) {
+  if (!matched || !replacement) return replacement;
+  if (matched === matched.toUpperCase() && matched !== matched.toLowerCase()) {
+    return replacement.toUpperCase();
+  }
+  if (matched[0] === matched[0].toLowerCase() && matched[0] !== matched[0].toUpperCase()) {
+    return replacement[0].toLowerCase() + replacement.slice(1);
+  }
+  return replacement;
+}
+
+function getPrecedingPrepositionCase(text, offset) {
+  const before = text.slice(Math.max(0, offset - 28), offset);
+  const m = before.match(/(?:^|[\s«„("—\-:,;])([а-яё\-]+)\s+$/i);
+  if (!m) return null;
+  return PREPOSITION_CASE_MAP[m[1].toLowerCase()] || null;
+}
+function compileNameReplacementPlan(rules) {
+  const formMap = new Map();
+  const activeRules = (rules || []).filter(r => r && r.enabled);
+
+  for (const rule of activeRules) {
+    const allRows = [
+      ...(rule.cases || []),
+      ...((rule.extraPairs || []).map((p, idx) => ({ code: `extra-${idx}`, from: p.from, to: p.to })))
+    ];
+    for (const row of allRows) {
+      const fromClean = (row.from || '').replace(/\s+/g, ' ').trim();
+      const toClean = (row.to || '').replace(/\s+/g, ' ').trim();
+      if (!fromClean || !toClean) continue;
+      const key = fromClean.toLowerCase();
+      if (!formMap.has(key)) {
+        formMap.set(key, {
+          fromLower: key,
+          defaultTo: toClean,
+          byCase: {},
+          distinctTargets: new Set([toClean])
+        });
+      }
+      const entry = formMap.get(key);
+      if (row.code && !entry.byCase[row.code]) {
+        entry.byCase[row.code] = toClean;
+      }
+      entry.distinctTargets.add(toClean);
+    }
+  }
+
+  if (formMap.size === 0) {
+    return { hasRules: false, regex: null, formMap };
+  }
+
+  const sortedKeys = Array.from(formMap.keys()).sort((a, b) => b.length - a.length);
+  const pattern = sortedKeys.map(escapeRegExp).join('|');
+  const regex = new RegExp(pattern, 'gi');
+  return { hasRules: true, regex, formMap };
+}
+
+function resolveReplacementTarget(entry, text, offset) {
+  if (entry.distinctTargets.size > 1) {
+    const prepCase = getPrecedingPrepositionCase(text, offset);
+    if (prepCase && entry.byCase[prepCase]) {
+      return entry.byCase[prepCase];
+    }
+  }
+  return entry.defaultTo;
+}
+
+function applyNameReplacementsToText(text, plan) {
+  if (!text || !plan || !plan.hasRules || !plan.regex) {
+    return { text: text || '', count: 0 };
+  }
+  const cleanSrc = String(text).replace(/\u00AD/g, '');
+  let count = 0;
+  const out = cleanSrc.replace(plan.regex, (matched, offset, fullStr) => {
+    const prevCh = offset > 0 ? fullStr[offset - 1] : '';
+    const nextIdx = offset + matched.length;
+    const nextCh = nextIdx < fullStr.length ? fullStr[nextIdx] : '';
+    if ((prevCh && WORD_CHAR_RE.test(prevCh)) || (nextCh && WORD_CHAR_RE.test(nextCh))) {
+      return matched;
+    }
+    const entry = plan.formMap.get(matched.toLowerCase());
+    if (!entry) return matched;
+    const target = resolveReplacementTarget(entry, fullStr, offset);
+    count++;
+    return preserveWordCase(matched, target);
+  });
+  return { text: out, count };
+}
+
+function applyNameReplacementsToDoc(rootNode, plan) {
+  if (!rootNode || !plan || !plan.hasRules) return 0;
+  const ownerDoc = rootNode.ownerDocument || rootNode;
+  const walker = ownerDoc.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT, null);
+  let node;
+  let total = 0;
+  while ((node = walker.nextNode())) {
+    const parentTag = node.parentNode && node.parentNode.nodeName ? node.parentNode.nodeName.toLowerCase() : '';
+    if (parentTag === 'script' || parentTag === 'style') continue;
+    if (!node.nodeValue || !node.nodeValue.trim()) continue;
+    const res = applyNameReplacementsToText(node.nodeValue, plan);
+    if (res.count > 0) {
+      node.nodeValue = res.text;
+      total += res.count;
+    }
+  }
+  return total;
+}
+
+function getBookFullPlainText(book) {
+  if (!book) return '';
+  const activeChs = (book.chapters || []).filter(c => !c.markedDelete);
+  const parts = activeChs.map(c => c.plainText || c.snippet || '');
+  if (appState.settings.namesInMeta !== false && book.description) {
+    parts.push(book.description);
+  }
+  return parts.join('\n');
+}
+
+function extractBookCharacterNames(book) {
+  if (!book) return [];
+  const fullText = getBookFullPlainText(book).slice(0, 350000);
+  const freq = new Map();
+  const midSentenceRe = /[а-яёa-z,\-—:;]\s+([А-ЯЁ][а-яё]{2,15})/g;
+  let m;
+  while ((m = midSentenceRe.exec(fullText)) !== null) {
+    const w = m[1];
+    if (RU_STOP_CAP.has(w) || RU_STOP_CAP.has(w.toLowerCase())) continue;
+    if (/(?:ать|ять|еть|ить|уть|лся|лась|лись|ющий|аяся|оеся|ого|ому|ыми|ими|ость|ение|ание)$/i.test(w)) continue;
+    freq.set(w, (freq.get(w) || 0) + 1);
+  }
+  return Array.from(freq.entries())
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 14)
+    .map(([name, count]) => ({ name, count }));
+}
+function analyzeRuleAgainstBook(book, rule) {
+  const result = {
+    totalHits: 0,
+    formHits: new Map(),
+    ambiguousForms: [],
+    samples: []
+  };
+  if (!book || !rule) return result;
+
+  const singlePlan = compileNameReplacementPlan([{ ...rule, enabled: true }]);
+  for (const [k, entry] of singlePlan.formMap.entries()) {
+    if (entry.distinctTargets.size > 1) {
+      result.ambiguousForms.push(k);
+    }
+  }
+  if (!singlePlan.hasRules || !singlePlan.regex) return result;
+
+  const fullText = getBookFullPlainText(book);
+  if (!fullText) return result;
+
+  let m;
+  singlePlan.regex.lastIndex = 0;
+  while ((m = singlePlan.regex.exec(fullText)) !== null) {
+    const matched = m[0];
+    const offset = m.index;
+    const prevCh = offset > 0 ? fullText[offset - 1] : '';
+    const nextIdx = offset + matched.length;
+    const nextCh = nextIdx < fullText.length ? fullText[nextIdx] : '';
+    if ((prevCh && WORD_CHAR_RE.test(prevCh)) || (nextCh && WORD_CHAR_RE.test(nextCh))) {
+      continue;
+    }
+    const lowKey = matched.toLowerCase();
+    const entry = singlePlan.formMap.get(lowKey);
+    if (!entry) continue;
+
+    result.totalHits++;
+    result.formHits.set(lowKey, (result.formHits.get(lowKey) || 0) + 1);
+
+    if (result.samples.length < 3) {
+      const target = preserveWordCase(matched, resolveReplacementTarget(entry, fullText, offset));
+      const start = Math.max(0, offset - 48);
+      const end = Math.min(fullText.length, nextIdx + 52);
+      const prefix = (start > 0 ? '…' : '') + fullText.slice(start, offset).replace(/\s+/g, ' ');
+      const suffix = fullText.slice(nextIdx, end).replace(/\s+/g, ' ') + (end < fullText.length ? '…' : '');
+      result.samples.push({ prefix, oldWord: matched, newWord: target, suffix });
+    }
+  }
+
+  return result;
+}
+
+function getBookNameHitsTotal(book) {
+  if (!book) return 0;
+  const plan = compileNameReplacementPlan(appState.nameRules);
+  if (!plan.hasRules) return 0;
+  return applyNameReplacementsToText(getBookFullPlainText(book), plan).count;
+}
+
+function renderDetectedNames() {
+  if (!els.detectedNamesBlock || !els.detectedNamesChips) return;
+  const book = activeBook();
+  if (!book) {
+    els.detectedNamesBlock.classList.add('hidden');
+    return;
+  }
+
+  const list = extractBookCharacterNames(book);
+  if (!list.length) {
+    els.detectedNamesBlock.classList.add('hidden');
+    return;
+  }
+
+  els.detectedNamesBlock.classList.remove('hidden');
+  els.detectedNamesChips.innerHTML = '';
+
+  list.forEach(item => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'name-chip';
+    chip.innerHTML = `<span>${escapeXml(item.name)}</span><span class="name-chip-count">${item.count}</span>`;
+    chip.addEventListener('click', () => {
+      if (els.nameFromInput) {
+        els.nameFromInput.value = item.name;
+        if (els.nameToInput) {
+          if (!els.nameToInput.value.trim()) els.nameToInput.value = item.name;
+          els.nameToInput.focus();
+          els.nameToInput.select();
+        }
+      }
+    });
+    els.detectedNamesChips.appendChild(chip);
+  });
+}
+function buildRulePreviewHtml(analysis) {
+  let html = '';
+  if (analysis.ambiguousForms.length > 0) {
+    html += `<div class="name-warn-note">Форма «${escapeXml(analysis.ambiguousForms[0])}» совпадает в нескольких падежах с разными окончаниями — падеж определяется по предлогу перед именем, а без предлога используется форма И.п.</div>`;
+  }
+  if (analysis.samples.length > 0) {
+    const items = analysis.samples.map(s => `
+      <div class="name-preview-item">
+        ${escapeXml(s.prefix)}<span class="name-diff-old">${escapeXml(s.oldWord)}</span><span class="name-diff-new">${escapeXml(s.newWord)}</span>${escapeXml(s.suffix)}
+      </div>
+    `).join('');
+    html += `<div class="name-preview-box"><span class="name-preview-title">Примеры в книге</span>${items}</div>`;
+  }
+  return html;
+}
+
+function updateRuleCardLiveStats(cardEl, rule, book) {
+  const analysis = analyzeRuleAgainstBook(book, rule);
+  const pillEl = cardEl.querySelector('.rule-hits-pill');
+  if (pillEl) {
+    pillEl.textContent = `${analysis.totalHits} совп.`;
+    pillEl.className = 'pill rule-hits-pill' + (analysis.totalHits > 0 && rule.enabled ? ' has-hits' : '');
+  }
+
+  const seenForms = new Set();
+  cardEl.querySelectorAll('tr[data-row-kind]').forEach(tr => {
+    const fromInput = tr.querySelector('.decl-from-input');
+    const countCell = tr.querySelector('.decl-count-cell');
+    if (!fromInput || !countCell) return;
+    const key = (fromInput.value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!key) {
+      countCell.textContent = '0';
+      countCell.className = 'decl-count-cell';
+      return;
+    }
+    if (seenForms.has(key)) {
+      countCell.textContent = 'повтор';
+      countCell.className = 'decl-count-cell';
+      return;
+    }
+    seenForms.add(key);
+    const c = analysis.formHits.get(key) || 0;
+    countCell.textContent = String(c);
+    countCell.className = 'decl-count-cell' + (c > 0 ? ' has-hits' : '');
+  });
+
+  const dynBox = cardEl.querySelector('.rule-dynamic-preview');
+  if (dynBox) {
+    dynBox.innerHTML = buildRulePreviewHtml(analysis);
+  }
+}
+
+function renderNameRules() {
+  if (!els.nameRulesList || !els.nameRulesEmpty || !els.nameRulesCountLabel) return;
+  const rules = appState.nameRules;
+  const book = activeBook();
+
+  els.nameRulesList.innerHTML = '';
+  els.nameRulesEmpty.classList.toggle('hidden', rules.length > 0);
+  if (els.clearNameRulesBtn) {
+    els.clearNameRulesBtn.classList.toggle('hidden', rules.length === 0);
+  }
+
+  const enabledCount = rules.filter(r => r.enabled).length;
+  els.nameRulesCountLabel.textContent = rules.length === 0
+    ? 'Правил нет'
+    : `Правил: ${rules.length} (активно: ${enabledCount})`;
+
+  rules.forEach((rule, ruleIdx) => {
+    const card = document.createElement('div');
+    card.className = 'name-rule-card' + (rule.enabled ? '' : ' is-disabled');
+
+    const resolvedGen = rule.gender === 'auto' ? detectNameGender(rule.from) : rule.gender;
+    const genderBadgeText = rule.gender === 'auto'
+      ? `Авто · ${GENDER_LABELS[resolvedGen] || 'Муж.'}`
+      : (GENDER_LABELS[rule.gender] || 'Авто');
+
+    const caseRowsHtml = (rule.cases || []).map((c, cIdx) => `
+      <tr data-row-kind="case" data-idx="${cIdx}">
+        <td class="decl-case-cell">
+          <span class="decl-case-code">${escapeXml(c.label)}</span>
+          <span class="decl-case-hint">${escapeXml(c.hint)}</span>
+        </td>
+        <td><input type="text" class="decl-input decl-from-input" value="${escapeXml(c.from)}" aria-label="${escapeXml(c.label)} было"></td>
+        <td><input type="text" class="decl-input decl-to-input" value="${escapeXml(c.to)}" aria-label="${escapeXml(c.label)} стало"></td>
+        <td class="decl-count-cell">0</td>
+        <td></td>
+      </tr>
+    `).join('');
+
+    const extraRowsHtml = (rule.extraPairs || []).map((p, eIdx) => `
+      <tr data-row-kind="extra" data-idx="${eIdx}">
+        <td class="decl-case-cell"><span class="decl-case-code">Доп.</span></td>
+        <td><input type="text" class="decl-input decl-from-input" value="${escapeXml(p.from)}" placeholder="Форма в книге"></td>
+        <td><input type="text" class="decl-input decl-to-input" value="${escapeXml(p.to)}" placeholder="Замена"></td>
+        <td class="decl-count-cell">0</td>
+        <td><button type="button" class="decl-remove-btn" data-remove-extra="${eIdx}" title="Удалить форму">×</button></td>
+      </tr>
+    `).join('');
+    card.innerHTML = `
+      <div class="name-rule-head">
+        <div class="name-rule-left">
+          <input type="checkbox" class="checkbox-sm rule-enable-check" ${rule.enabled ? 'checked' : ''} aria-label="Включить правило">
+          <div class="name-rule-pair">
+            <span class="name-rule-from">${escapeXml(rule.from)}</span>
+            <span class="name-rule-arrow">→</span>
+            <span class="name-rule-to">${escapeXml(rule.to)}</span>
+            <span class="badge">${escapeXml(genderBadgeText)}</span>
+            <span class="pill rule-hits-pill">0 совп.</span>
+          </div>
+        </div>
+        <div class="name-rule-right">
+          <button type="button" class="btn-secondary btn-sm rule-toggle-table-btn">${rule.expanded ? 'Скрыть таблицу' : 'Таблица склонений'}</button>
+          <button type="button" class="btn-ghost btn-sm rule-delete-btn">Удалить</button>
+        </div>
+      </div>
+      <div class="name-rule-body ${rule.expanded ? '' : 'hidden'}">
+        <div class="decl-toolbar">
+          <div class="decl-toolbar-left">
+            <select class="input input-sm select-input decl-select rule-gender-select" aria-label="Род и тип склонения">
+              <option value="auto" ${rule.gender === 'auto' ? 'selected' : ''}>Автоматически</option>
+              <option value="m" ${rule.gender === 'm' ? 'selected' : ''}>Мужское</option>
+              <option value="f" ${rule.gender === 'f' ? 'selected' : ''}>Женское</option>
+              <option value="indecl" ${rule.gender === 'indecl' ? 'selected' : ''}>Несклоняемое</option>
+            </select>
+            <button type="button" class="btn-secondary btn-sm rule-recalc-btn">Пересчитать падежи</button>
+          </div>
+          <button type="button" class="btn-ghost btn-sm rule-add-extra-btn">+ Своя форма</button>
+        </div>
+        <div class="decl-table-wrap">
+          <table class="declension-table">
+            <thead>
+              <tr>
+                <th>Падеж</th>
+                <th>В книге</th>
+                <th>Заменить на</th>
+                <th style="text-align:right;">Совп.</th>
+                <th style="width:28px;"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${caseRowsHtml}
+              ${extraRowsHtml}
+            </tbody>
+          </table>
+        </div>
+        <div class="rule-dynamic-preview"></div>
+      </div>
+    `;
+
+    card.querySelector('.rule-enable-check').addEventListener('change', (e) => {
+      rule.enabled = e.target.checked;
+      saveNameRules();
+      card.classList.toggle('is-disabled', !rule.enabled);
+      updateRuleCardLiveStats(card, rule, activeBook());
+      renderPreview();
+      updateChangesSummary();
+    });
+
+    card.querySelector('.rule-toggle-table-btn').addEventListener('click', (e) => {
+      rule.expanded = !rule.expanded;
+      const bodyEl = card.querySelector('.name-rule-body');
+      bodyEl.classList.toggle('hidden', !rule.expanded);
+      e.currentTarget.textContent = rule.expanded ? 'Скрыть таблицу' : 'Таблица склонений';
+    });
+
+    card.querySelector('.rule-delete-btn').addEventListener('click', () => {
+      appState.nameRules.splice(ruleIdx, 1);
+      saveNameRules();
+      renderNameRules();
+      renderPreview();
+      updateChangesSummary();
+      showToast('Правило удалено');
+    });
+    card.querySelector('.rule-gender-select').addEventListener('change', (e) => {
+      rule.gender = e.target.value;
+      rule.cases = buildCaseRows(rule.from, rule.to, rule.gender);
+      saveNameRules();
+      renderNameRules();
+      renderPreview();
+      updateChangesSummary();
+      showToast('Падежи пересчитаны');
+    });
+
+    card.querySelector('.rule-recalc-btn').addEventListener('click', () => {
+      if (rule.cases && rule.cases[0]) {
+        rule.from = (rule.cases[0].from || rule.from).trim() || rule.from;
+        rule.to = (rule.cases[0].to || rule.to).trim() || rule.to;
+      }
+      rule.cases = buildCaseRows(rule.from, rule.to, rule.gender);
+      saveNameRules();
+      renderNameRules();
+      renderPreview();
+      updateChangesSummary();
+      showToast('Таблица падежей обновлена');
+    });
+
+    card.querySelector('.rule-add-extra-btn').addEventListener('click', () => {
+      if (!Array.isArray(rule.extraPairs)) rule.extraPairs = [];
+      rule.extraPairs.push({ from: rule.from, to: rule.to });
+      rule.expanded = true;
+      saveNameRules();
+      renderNameRules();
+    });
+
+    card.querySelectorAll('[data-remove-extra]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.getAttribute('data-remove-extra'));
+        rule.extraPairs.splice(idx, 1);
+        saveNameRules();
+        renderNameRules();
+        renderPreview();
+        updateChangesSummary();
+      });
+    });
+
+    card.querySelectorAll('tr[data-row-kind]').forEach(tr => {
+      const kind = tr.getAttribute('data-row-kind');
+      const idx = Number(tr.getAttribute('data-idx'));
+      const fromInp = tr.querySelector('.decl-from-input');
+      const toInp = tr.querySelector('.decl-to-input');
+
+      const onEdit = () => {
+        const targetObj = kind === 'case' ? rule.cases[idx] : rule.extraPairs[idx];
+        if (!targetObj) return;
+        targetObj.from = fromInp.value;
+        targetObj.to = toInp.value;
+        if (kind === 'case' && idx === 0) {
+          rule.from = fromInp.value.trim() || rule.from;
+          rule.to = toInp.value.trim() || rule.to;
+          const headFrom = card.querySelector('.name-rule-from');
+          const headTo = card.querySelector('.name-rule-to');
+          if (headFrom) headFrom.textContent = rule.from;
+          if (headTo) headTo.textContent = rule.to;
+        }
+        saveNameRules();
+        updateRuleCardLiveStats(card, rule, activeBook());
+        renderPreview();
+        updateChangesSummary();
+      };
+
+      fromInp.addEventListener('input', onEdit);
+      toInp.addEventListener('input', onEdit);
+    });
+
+    updateRuleCardLiveStats(card, rule, book);
+    els.nameRulesList.appendChild(card);
+  });
+}
+
+if (els.nameRuleForm) {
+  els.nameRuleForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const fromVal = (els.nameFromInput.value || '').replace(/\s+/g, ' ').trim();
+    const toVal = (els.nameToInput.value || '').replace(/\s+/g, ' ').trim();
+    const genderVal = els.nameGenderSelect ? els.nameGenderSelect.value : 'auto';
+
+    if (!fromVal || !toVal) {
+      showToast('Введите имя в книге и новое имя');
+      return;
+    }
+
+    const newRule = {
+      id: Math.random().toString(36).slice(2),
+      enabled: true,
+      from: fromVal,
+      to: toVal,
+      gender: genderVal,
+      expanded: true,
+      cases: buildCaseRows(fromVal, toVal, genderVal),
+      extraPairs: []
+    };
+
+    appState.nameRules.unshift(newRule);
+    saveNameRules();
+
+    els.nameFromInput.value = '';
+    els.nameToInput.value = '';
+    if (els.nameGenderSelect) els.nameGenderSelect.value = 'auto';
+
+    renderNameRules();
+    renderPreview();
+    updateChangesSummary();
+    showToast(`Добавлена замена: ${fromVal} → ${toVal}`);
+  });
+}
+
+if (els.clearNameRulesBtn) {
+  els.clearNameRulesBtn.addEventListener('click', () => {
+    if (!appState.nameRules.length) return;
+    appState.nameRules = [];
+    saveNameRules();
+    renderNameRules();
+    renderPreview();
+    updateChangesSummary();
+    showToast('Список замен очищен');
+  });
+}
+
+renderNameRules();
+

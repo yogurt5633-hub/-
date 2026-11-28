@@ -49,12 +49,31 @@
       <section id="queuePanel" class="queue-bar hidden">
         <div class="queue-header">
           <span id="queueTitle" class="queue-label">Книги в работе</span>
-          <span class="queue-hint">Настройки вёрстки общие для всех</span>
+          <span class="queue-hint">Вёрстка и замены имён общие для серии</span>
         </div>
         <div id="bookTabs" class="book-tabs"></div>
       </section>
 
-      <!-- 1. Обложка и метаданные текущей книги -->
+      <!-- Навигация по разделам -->
+      <nav class="workspace-tabs" role="tablist" aria-label="Разделы редактора">
+        <button type="button" class="workspace-tab active" role="tab" aria-selected="true" data-tab="edition">
+          <span>Издание</span>
+        </button>
+        <button type="button" class="workspace-tab" role="tab" aria-selected="false" data-tab="layout">
+          <span>Вёрстка</span>
+        </button>
+        <button type="button" class="workspace-tab" role="tab" aria-selected="false" data-tab="names">
+          <span>Замена имён</span>
+          <span id="namesTabBadge" class="tab-badge hidden">0</span>
+        </button>
+        <button type="button" class="workspace-tab" role="tab" aria-selected="false" data-tab="contents">
+          <span>Состав</span>
+          <span id="contentsTabBadge" class="tab-badge hidden">0</span>
+        </button>
+      </nav>
+
+      <!-- Вкладка 1: Издание -->
+      <div class="tab-panel" data-tab-panel="edition">
       <section class="panel">
         <div class="panel-header">
           <h2 class="panel-title">Издание</h2>
@@ -102,7 +121,7 @@
             </label>
             <div class="field">
               <div class="field-label-row">
-                <span class="field-label">Аннотация (описание)</span>
+                <span class="field-label">Аннотация</span>
                 <div class="inline-actions">
                   <button id="findDescBtn" class="btn-link" type="button">Найти в сети</button>
                   <span class="dot-sep">·</span>
@@ -111,7 +130,7 @@
               </div>
               <div id="detectedOrigRow" class="detected-orig hidden"></div>
               <div id="searchCandidatesBox" class="candidates-box hidden"></div>
-              <textarea id="descInput" class="textarea" rows="4" placeholder="Описание отсутствует. Нажмите «Найти в сети» или введите текст..."></textarea>
+              <textarea id="descInput" class="textarea" rows="4" placeholder="Описание отсутствует. Нажмите «Найти в сети» или введите текст"></textarea>
               <label class="inline-check">
                 <input type="checkbox" id="insertDescPageToggle" class="checkbox-sm" checked>
                 <span>Добавить страницу с аннотацией в начало книги</span>
@@ -123,7 +142,7 @@
                 <button id="closeCoverGalleryBtn" class="btn-link" type="button">Скрыть</button>
               </div>
               <div class="cg-search-row">
-                <input type="text" id="coverQueryInput" class="input input-sm" placeholder="Название / автор на англ. или рус...">
+                <input type="text" id="coverQueryInput" class="input input-sm" placeholder="Название или автор на англ. / рус.">
                 <button id="runCoverSearchBtn" class="btn-secondary btn-sm" type="button">Искать</button>
               </div>
               <div class="cg-Chips">
@@ -132,7 +151,7 @@
                 <button type="button" class="cg-chip" data-edition="uk edition hardcover">Переиздания / UK</button>
                 <button type="button" class="cg-chip" data-edition="bonus extended">Бонусные</button>
               </div>
-              <div id="coverGalleryStatus" class="cg-status">Нажмите «Искать», чтобы загрузить обложки...</div>
+              <div id="coverGalleryStatus" class="cg-status">Нажмите «Искать», чтобы загрузить обложки</div>
               <div id="coverGalleryGrid" class="cg-grid"></div>
             </div>
             <div class="stats-row">
@@ -156,160 +175,17 @@
           </div>
         </div>
       </section>
+      </div>
 
-      <!-- 2. Вёрстка, типографика, шрифт и превью -->
+      <!-- Вкладка 2: Вёрстка -->
+      <div class="tab-panel hidden" data-tab-panel="layout">
       <section class="panel">
         <div class="panel-header">
           <h2 class="panel-title">Вёрстка и типографика</h2>
           <span class="badge">Сохраняется</span>
         </div>
 
-        <div class="controls-list">
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <span class="toggle-title">Убрать красную строку</span>
-              <span class="toggle-sub">Сбрасывает отступ первой строки и лишние пробелы в начале абзаца</span>
-            </div>
-            <input type="checkbox" id="removeIndentToggle" class="checkbox" checked>
-          </label>
-
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <span class="toggle-title">Очистить пустые строки-разделители</span>
-              <span class="toggle-sub">Убирает лишние пустые абзацы, чтобы интервалы не удваивались</span>
-            </div>
-            <input type="checkbox" id="cleanEmptyToggle" class="checkbox" checked>
-          </label>
-
-          <div class="slider-row">
-            <div class="slider-header">
-              <span class="toggle-title">Интервал между абзацами</span>
-              <span id="spacingVal" class="mono-val">0.85 em</span>
-            </div>
-            <input type="range" id="spacingRange" min="0" max="1.6" step="0.05" value="0.85" class="range">
-          </div>
-
-          <div class="divider"></div>
-
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <div class="title-with-pill">
-                <span class="toggle-title">Заменять дефисы на длинное тире (—)</span>
-                <span id="dashCountPill" class="pill">0</span>
-              </div>
-              <span class="toggle-sub">Не трогает слова с дефисом («кто-то») и уже стоящие длинные тире</span>
-            </div>
-            <input type="checkbox" id="fixDashesToggle" class="checkbox" checked>
-          </label>
-
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <div class="title-with-pill">
-                <span class="toggle-title">Убрать двойные пробелы и троеточия</span>
-                <span id="typoCountPill" class="pill">0</span>
-              </div>
-              <span class="toggle-sub">Меняет «...» на «…» и вычищает случайные лишние пробелы</span>
-            </div>
-            <input type="checkbox" id="fixTypoToggle" class="checkbox">
-          </label>
-
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <span class="toggle-title">Починить тёмную тему</span>
-              <span class="toggle-sub">Сбрасывает зашитые цвета текста и белые фоны внутри книги</span>
-            </div>
-            <input type="checkbox" id="fixDarkModeToggle" class="checkbox" checked>
-          </label>
-
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <div class="title-with-pill">
-                <span class="toggle-title">Всплывающие сноски на Kindle (Pop-up)</span>
-                <span id="footnotesCountPill" class="pill">0</span>
-              </div>
-              <span class="toggle-sub">Превращает ссылки-сноски и «(Прим. пер.: ...)» во всплывающие окошки</span>
-            </div>
-            <input type="checkbox" id="popupFootnotesToggle" class="checkbox" checked>
-          </label>
-
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <span class="toggle-title">Мягкие переносы и защита предлогов</span>
-              <span class="toggle-sub">Убирает дыры между словами на Kindle и приклеивает предлоги (в, на, и, не)</span>
-            </div>
-            <input type="checkbox" id="hyphenateToggle" class="checkbox" checked>
-          </label>
-
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <span class="toggle-title">Починить оглавление для прогресс-бара Kindle</span>
-              <span class="toggle-sub">Находит «Глава 1», «Пролог», «Эпилог» в тексте и собирает точки глав</span>
-            </div>
-            <input type="checkbox" id="rebuildTocToggle" class="checkbox" checked>
-          </label>
-
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <span class="toggle-title">Сжать тяжёлые картинки (для Send to Kindle)</span>
-              <span class="toggle-sub">Оптимизирует иллюстрации до 1200px, чтобы книга легко проходила лимит 50 МБ</span>
-            </div>
-            <input type="checkbox" id="compressImagesToggle" class="checkbox">
-          </label>
-
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <div class="title-with-pill">
-                <span class="toggle-title">Показывать страницы на Kindle (вместо «Мест»)</span>
-                <span id="kindlePagesPill" class="pill has-hits">~0 стр.</span>
-              </div>
-              <span class="toggle-sub">Вшивает невидимую разметку страниц (page-list) для Send to Kindle</span>
-            </div>
-            <input type="checkbox" id="kindlePagesToggle" class="checkbox" checked>
-          </label>
-
-          <label class="toggle-row">
-            <div class="toggle-text">
-              <div class="title-with-pill">
-                <span class="toggle-title">Вырезать вшитое аудио и видео (MP3/MP4)</span>
-                <span id="mediaCountPill" class="pill">Нет</span>
-              </div>
-              <span class="toggle-sub">Удаляет аудиофайлы и плееры, которые переводчики вшивают в EPUB</span>
-            </div>
-            <input type="checkbox" id="stripMediaToggle" class="checkbox" checked>
-          </label>
-
-          <div class="divider"></div>
-
-          <div class="select-grid">
-            <label class="field">
-              <span class="field-label">Шрифт книги</span>
-              <select id="fontSelect" class="input select-input">
-                <option value="keep">Как в книге</option>
-                <option value="reset">Сбросить (выбор читалки)</option>
-                <option value="serif">Книжный (Georgia / Serif)</option>
-                <option value="sans">Без засечек (Sans-serif)</option>
-                <option value="custom">Свой файл (.ttf / .otf)</option>
-              </select>
-            </label>
-
-            <label class="field">
-              <span class="field-label">Выравнивание</span>
-              <select id="alignSelect" class="input select-input">
-                <option value="keep">Как в книге</option>
-                <option value="justify">По ширине</option>
-                <option value="left">По левому краю</option>
-              </select>
-            </label>
-          </div>
-
-          <div id="customFontRow" class="custom-font-row hidden">
-            <input type="file" id="fontFileInput" accept=".ttf,.otf,.woff,.woff2" hidden>
-            <button id="selectFontFileBtn" class="btn-secondary btn-sm" type="button">Загрузить шрифт</button>
-            <span id="fontFileName" class="font-file-name">Файл не выбран</span>
-          </div>
-        </div>
-
-        <div class="preview-wrapper">
+        <div class="preview-wrapper preview-top">
           <div class="preview-bar">
             <span>Фрагмент текста</span>
             <span class="preview-guide-label">Линия поля · 0 px</span>
@@ -319,9 +195,229 @@
             <div id="livePreview" class="paper-content"></div>
           </div>
         </div>
-      </section>
 
-      <!-- 3. Главы книги (безопасное удаление рекламы/мусора) -->
+        <div class="control-group">
+          <h3 class="control-group-title">Абзацы и отступы</h3>
+          <div class="controls-list">
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <span class="toggle-title">Убрать красную строку</span>
+                <span class="toggle-sub">Сбрасывает отступ первой строки и лишние пробелы в начале абзаца</span>
+              </div>
+              <input type="checkbox" id="removeIndentToggle" class="checkbox" checked>
+            </label>
+
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <span class="toggle-title">Очистить пустые строки-разделители</span>
+                <span class="toggle-sub">Убирает лишние пустые абзацы, чтобы интервалы не удваивались</span>
+              </div>
+              <input type="checkbox" id="cleanEmptyToggle" class="checkbox" checked>
+            </label>
+
+            <div class="slider-row">
+              <div class="slider-header">
+                <span class="toggle-title">Интервал между абзацами</span>
+                <span id="spacingVal" class="mono-val">0.85 em</span>
+              </div>
+              <input type="range" id="spacingRange" min="0" max="1.6" step="0.05" value="0.85" class="range">
+            </div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="control-group">
+          <h3 class="control-group-title">Текст и шрифт</h3>
+          <div class="controls-list">
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <div class="title-with-pill">
+                  <span class="toggle-title">Заменять дефисы на длинное тире (—)</span>
+                  <span id="dashCountPill" class="pill">0</span>
+                </div>
+                <span class="toggle-sub">Не трогает слова с дефисом («кто-то») и уже стоящие длинные тире</span>
+              </div>
+              <input type="checkbox" id="fixDashesToggle" class="checkbox" checked>
+            </label>
+
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <div class="title-with-pill">
+                  <span class="toggle-title">Убрать двойные пробелы и троеточия</span>
+                  <span id="typoCountPill" class="pill">0</span>
+                </div>
+                <span class="toggle-sub">Меняет «...» на «…» и вычищает случайные лишние пробелы</span>
+              </div>
+              <input type="checkbox" id="fixTypoToggle" class="checkbox">
+            </label>
+
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <span class="toggle-title">Починить тёмную тему</span>
+                <span class="toggle-sub">Сбрасывает зашитые цвета текста и белые фоны внутри книги</span>
+              </div>
+              <input type="checkbox" id="fixDarkModeToggle" class="checkbox" checked>
+            </label>
+
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <span class="toggle-title">Мягкие переносы и защита предлогов</span>
+                <span class="toggle-sub">Убирает дыры между словами и приклеивает предлоги (в, на, и, не)</span>
+              </div>
+              <input type="checkbox" id="hyphenateToggle" class="checkbox" checked>
+            </label>
+
+            <div class="select-grid">
+              <label class="field">
+                <span class="field-label">Шрифт книги</span>
+                <select id="fontSelect" class="input select-input">
+                  <option value="keep">Как в книге</option>
+                  <option value="reset">Сбросить (выбор читалки)</option>
+                  <option value="serif">Книжный (Georgia / Serif)</option>
+                  <option value="sans">Без засечек (Sans-serif)</option>
+                  <option value="custom">Свой файл (.ttf / .otf)</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span class="field-label">Выравнивание</span>
+                <select id="alignSelect" class="input select-input">
+                  <option value="keep">Как в книге</option>
+                  <option value="justify">По ширине</option>
+                  <option value="left">По левому краю</option>
+                </select>
+              </label>
+            </div>
+
+            <div id="customFontRow" class="custom-font-row hidden">
+              <input type="file" id="fontFileInput" accept=".ttf,.otf,.woff,.woff2" hidden>
+              <button id="selectFontFileBtn" class="btn-secondary btn-sm" type="button">Загрузить шрифт</button>
+              <span id="fontFileName" class="font-file-name">Файл не выбран</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="control-group">
+          <h3 class="control-group-title">Подготовка для Kindle и очистка</h3>
+          <div class="controls-list">
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <div class="title-with-pill">
+                  <span class="toggle-title">Всплывающие сноски (Pop-up)</span>
+                  <span id="footnotesCountPill" class="pill">0</span>
+                </div>
+                <span class="toggle-sub">Превращает ссылки-сноски и «(Прим. пер.: …)» во всплывающие окошки</span>
+              </div>
+              <input type="checkbox" id="popupFootnotesToggle" class="checkbox" checked>
+            </label>
+
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <span class="toggle-title">Починить оглавление для прогресс-бара</span>
+                <span class="toggle-sub">Находит «Глава 1», «Пролог», «Эпилог» в тексте и собирает точки глав</span>
+              </div>
+              <input type="checkbox" id="rebuildTocToggle" class="checkbox" checked>
+            </label>
+
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <div class="title-with-pill">
+                  <span class="toggle-title">Показывать страницы (вместо «Мест»)</span>
+                  <span id="kindlePagesPill" class="pill has-hits">~0 стр.</span>
+                </div>
+                <span class="toggle-sub">Вшивает невидимую разметку страниц (page-list) для Send to Kindle</span>
+              </div>
+              <input type="checkbox" id="kindlePagesToggle" class="checkbox" checked>
+            </label>
+
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <span class="toggle-title">Сжать тяжёлые картинки</span>
+                <span class="toggle-sub">Оптимизирует иллюстрации до 1200 px, чтобы книга проходила лимит 50 МБ</span>
+              </div>
+              <input type="checkbox" id="compressImagesToggle" class="checkbox">
+            </label>
+
+            <label class="toggle-row">
+              <div class="toggle-text">
+                <div class="title-with-pill">
+                  <span class="toggle-title">Вырезать вшитое аудио и видео (MP3/MP4)</span>
+                  <span id="mediaCountPill" class="pill">Нет</span>
+                </div>
+                <span class="toggle-sub">Удаляет аудиофайлы и плееры, которые переводчики вшивают в EPUB</span>
+              </div>
+              <input type="checkbox" id="stripMediaToggle" class="checkbox" checked>
+            </label>
+          </div>
+        </div>
+      </section>
+      </div>
+
+      <!-- Вкладка 3: Замена имён -->
+      <div class="tab-panel hidden" data-tab-panel="names">
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">Замена имён</h2>
+            <p class="panel-sub">Введите имя в начальной форме — падежи соберутся автоматически, таблицу можно поправить вручную</p>
+          </div>
+          <span id="namesTotalHitsBadge" class="badge">0 совп.</span>
+        </div>
+
+        <form id="nameRuleForm" class="name-add-box" autocomplete="off">
+          <div class="name-form-grid">
+            <label class="field">
+              <span class="field-label">Имя в книге</span>
+              <input type="text" id="nameFromInput" class="input" placeholder="Например: Кайлеб">
+            </label>
+            <label class="field">
+              <span class="field-label">Заменить на</span>
+              <input type="text" id="nameToInput" class="input" placeholder="Например: Калеб">
+            </label>
+          </div>
+          <div class="name-form-footer">
+            <label class="name-gender-wrap">
+              <span class="field-label">Склонение</span>
+              <select id="nameGenderSelect" class="input input-sm select-input">
+                <option value="auto">Автоматически</option>
+                <option value="m">Мужское</option>
+                <option value="f">Женское</option>
+                <option value="indecl">Несклоняемое</option>
+              </select>
+            </label>
+            <button id="addNameRuleBtn" class="btn-primary btn-sm-tall" type="submit">Добавить</button>
+          </div>
+        </form>
+
+        <div id="detectedNamesBlock" class="detected-names-block hidden">
+          <div class="detected-names-head">
+            <span class="field-label">Частые имена в этой книге</span>
+            <span class="queue-hint">Нажмите, чтобы подставить</span>
+          </div>
+          <div id="detectedNamesChips" class="detected-names-chips"></div>
+        </div>
+
+        <div class="name-rules-header">
+          <span id="nameRulesCountLabel" class="selection-counter">Правил нет</span>
+          <div class="name-rules-actions">
+            <label class="inline-check compact-check">
+              <input type="checkbox" id="namesInMetaToggle" class="checkbox-sm" checked>
+              <span>Также в оглавлении и аннотации</span>
+            </label>
+            <button id="clearNameRulesBtn" class="btn-ghost btn-sm hidden" type="button">Очистить всё</button>
+          </div>
+        </div>
+
+        <div id="nameRulesEmpty" class="empty-note">Добавьте имя выше — здесь появится список правил с таблицей склонений и примерами из текста книги</div>
+        <div id="nameRulesList" class="name-rules-list"></div>
+      </section>
+      </div>
+
+      <!-- Вкладка 4: Состав -->
+      <div class="tab-panel hidden" data-tab-panel="contents">
       <section class="panel">
         <div class="panel-header">
           <div>
@@ -346,7 +442,7 @@
         <div class="panel-header">
           <div>
             <h2 class="panel-title">Иллюстрации внутри текста</h2>
-            <p class="panel-sub">Нажмите на картинку, чтобы отметить её на удаление (обложка настраивается сверху)</p>
+            <p class="panel-sub">Нажмите на картинку, чтобы отметить её на удаление (обложка во вкладке «Издание»)</p>
           </div>
         </div>
 
@@ -358,9 +454,10 @@
           </div>
         </div>
 
-        <div id="emptyImagesState" class="empty-note">Внутри книги нет иллюстраций.</div>
+        <div id="emptyImagesState" class="empty-note">Внутри книги нет иллюстраций</div>
         <div id="imagesGrid" class="images-grid"></div>
       </section>
+      </div>
 
       <!-- Нижняя панель сохранения -->
       <div class="action-bar">
